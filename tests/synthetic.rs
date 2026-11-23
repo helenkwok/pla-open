@@ -206,6 +206,8 @@ fn build() -> Vec<u8> {
     f.extend(raw_object(210, g(STORY), &story_payload("Ground Floor")));
     // Gap unit with stale bytes that almost look like a block header.
     f.extend(b"BL\x01\0\0\0\x09\x01\0stale!!");
+    // A one-unit block, too short for a full header.
+    f.extend(b"BL\x01\0\0\0\x05\0\x01\xA1\x04short");
     f.extend(raw_object(
         204,
         g(TOP),
@@ -274,7 +276,8 @@ fn walks_every_item_to_the_end() {
     let st = pla.walk(|_| Ok(())).unwrap();
     assert_eq!(st.sections, 1);
     assert_eq!(st.gap_units, 2);
-    assert_eq!(st.blocks, 9);
+    assert_eq!(st.blocks, 10);
+    assert_eq!(st.short_blocks, 1);
     assert_eq!(st.by_type[&-36], 2);
     assert_eq!(st.by_type[&265], 2);
     assert_eq!(st.by_type.get(&-534), None);

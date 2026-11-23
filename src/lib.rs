@@ -151,6 +151,8 @@ pub struct Stats {
     pub blocks: usize,
     pub sections: usize,
     pub gap_units: usize,
+    /// Blocks too short to hold the full 27-byte header (16 bytes).
+    pub short_blocks: usize,
     pub by_type: BTreeMap<i16, usize>,
 }
 
@@ -183,9 +185,12 @@ fn is_block_tag(b: &[u8]) -> bool {
 }
 
 fn info_from_header(h: &[u8], len: usize, location: Location) -> Result<BlockInfo> {
-    if h.len() < 27 {
-        return Err(Error::Corrupt("block shorter than its header"));
-    }
+    // A block can be shorter than the full header (one unit); its GUID is then
+    // incomplete and its missing bytes read as zero.
+    let mut padded = [0u8; 27];
+    let n = h.len().min(27);
+    padded[..n].copy_from_slice(&h[..n]);
+    let h = &padded;
     Ok(BlockInfo {
         block_type: u16_at(h, 6).unwrap() as i16,
         guid: Guid::from_slice(&h[11..27]),
@@ -341,15 +346,13 @@ impl Pla {
                 let len = too_large(16 * u)?;
                 let ty = u16_at(&unit, 6).unwrap() as i16;
                 if ty == FREE_BLOCK {
-                    let mut h = unit.to_vec();
-                    h.resize(27, 0);
-                    let info = info_from_header(&h, len, Location::File { offset: o })?;
-                    count(&mut st, ty);
+                    let info = info_from_header(&unit, len, Location::File { offset: o })?;
+                    count(&mut st, ty, len);
                     visit(&Block { info, bytes: &[] })?;
                 } else {
                     let bytes = self.read_at(o, len)?;
                     let info = info_from_header(&bytes, len, Location::File { offset: o })?;
-                    count(&mut st, ty);
+                    count(&mut st, ty, len);
                     visit(&Block {
                         info,
                         bytes: &bytes,
@@ -402,8 +405,11 @@ impl Pla {
     }
 }
 
-fn count(st: &mut Stats, ty: i16) {
+fn count(st: &mut Stats, ty: i16, len: usize) {
     st.blocks += 1;
+    if len < 27 {
+        st.short_blocks += 1;
+    }
     *st.by_type.entry(ty).or_default() += 1;
 }
 
@@ -422,7 +428,7 @@ fn walk_section(
         }
         let len = 16 * u;
         let info = info_from_header(&h[..len], len, Location::Section { section, offset: o })?;
-        count(st, info.block_type);
+        count(st, info.block_type, len);
         let bytes = if info.block_type == FREE_BLOCK {
             &[][..]
         } else {

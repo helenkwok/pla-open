@@ -59,9 +59,15 @@ fn walls_match_details() {
             ));
         }
         for e in expected {
-            let guid = Guid::parse(e["guid"].as_str().unwrap()).unwrap();
-            let Some(w) = walls.iter().find(|w| w.guid == guid) else {
-                problems.push(format!("{name}: wall {guid} not found"));
+            // Match by GUID; older details files have none, so fall back to the element ID.
+            let guid = e["guid"].as_str().and_then(Guid::parse);
+            let label = e["guid"].as_str().or(e["id"].as_str()).unwrap_or("?");
+            let found = walls.iter().find(|w| match guid {
+                Some(g) => w.guid == g,
+                None => e["id"].as_str() == Some(w.id.as_str()),
+            });
+            let Some(w) = found else {
+                problems.push(format!("{name}: wall {label} not found"));
                 continue;
             };
             let x = &e["details"];
@@ -96,7 +102,7 @@ fn walls_match_details() {
             if bad.is_empty() {
                 matched += 1;
             } else {
-                problems.push(format!("{name}: wall {guid}: {}", bad.join(", ")));
+                problems.push(format!("{name}: wall {label}: {}", bad.join(", ")));
             }
         }
     }

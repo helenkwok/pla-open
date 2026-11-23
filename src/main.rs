@@ -22,8 +22,8 @@ fn info(path: &str) -> Result<()> {
         .collect();
     println!("header words: {}", words.join(" "));
     println!(
-        "blocks: {}  compressed sections: {}  gap units: {}  payloads not decoded: {}",
-        stats.blocks, stats.sections, stats.gap_units, failed
+        "blocks: {} (one-unit: {})  compressed sections: {}  gap units: {}  payloads not decoded: {}",
+        stats.blocks, stats.short_blocks, stats.sections, stats.gap_units, failed
     );
     println!("blocks by type:");
     for (ty, n) in &stats.by_type {
