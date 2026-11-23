@@ -1,0 +1,11 @@
+[package]
+name = "pla-open"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Reads Archicad project files (.pln, .pla): container and walls"
+repository = "https://github.com/helenkwok/pla-open"
+readme = "README.md"
+
+[dependencies]
+serde_json = "=1.0.154"
