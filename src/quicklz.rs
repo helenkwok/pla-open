@@ -37,6 +37,12 @@ fn chunk_header(input: &[u8]) -> Result<(usize, usize, usize, bool)> {
     Ok((hl, size, dsize, h & 1 != 0))
 }
 
+/// Chunk size (header included) and decompressed size from a chunk's header.
+pub fn chunk_sizes(input: &[u8]) -> Result<(usize, usize)> {
+    let (_, size, dsize, _) = chunk_header(input)?;
+    Ok((size, dsize))
+}
+
 /// Decode chunks back to back from `input` until `out_len` bytes are produced.
 /// The chunk sizes must add up to the whole input.
 pub fn decompress(input: &[u8], out_len: usize, limit: usize) -> Result<Vec<u8>> {

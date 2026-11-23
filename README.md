@@ -4,7 +4,7 @@ An open-source reader for Archicad project files (`.pln` and `.pla`), written in
 
 ## What it reads
 
-- **The container.** It checks the file signature, walks the whole file (blocks, compressed sections and the empty units between them) and decodes block payloads stored raw, with a zero mask, or with QuickLZ level 1. Every block can be listed by type and GUID.
+- **The container.** It checks the file signature, walks the whole file (blocks, compressed sections and the empty units between them) and decodes block payloads stored raw, with a zero mask, or with QuickLZ level 1. Large compressed sections are stored in 1 MiB chunks; the reader joins them before walking the blocks inside, since blocks cross chunk boundaries. Every block can be listed by type and GUID.
 - **Stories.** The story table: index (negative for stories below ground), level, height and name of each story, plus the extra story above the top one that the file keeps to give the top story its height.
 - **Walls.** For each wall: element ID, start and end points, thickness at each end, height, bottom offset, home story, and for a wall whose top is linked to a story the top story, the top offset and the height worked out from the story levels. Also the reference line (outside, center, inside, or the same three for the core) with its offset and its distance from the outside face, whether the wall is flipped, basic or composite structure with the composite's name, straight, trapezoid or polygonal plan, the arc angle of a curved wall, and normal or slanted profile with the slant angle.
 
