@@ -790,10 +790,14 @@ fn negative_story_indices() {
     assert_eq!(w.relative_top_story, Some(1));
     // 0 + 0.5 - (-3) - 0
     assert!((w.height.unwrap() - 3.5).abs() < 1e-12);
-    // The second home link is noted; the first one wins.
+    // The second home link is noted; the first one wins. (The file's two
+    // composites share an index, which every composite wall notes too.)
     assert_eq!(
         w.notes,
-        ["more than one home story link; the first is used"]
+        [
+            "more than one home story link; the first is used",
+            "2 composites share index 23; none is used"
+        ]
     );
 }
 
