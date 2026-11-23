@@ -11,7 +11,7 @@ use crate::opening::{self, Opening, OpeningKind};
 use crate::story::{self, Story, STORY_TABLE_TYPE, STORY_TYPE};
 use crate::{
     counted_utf16, f64_at, i32_at, links, split_object, u16_at, u32_at, utf16, Error, Guid, Pla,
-    Result, TAG_OWNED_BY, TAG_OWNS,
+    Result, TAG_OWNED_BY, TAG_OWNS, TAG_OWNS_MANY,
 };
 
 pub(crate) const WALL_CLASS: &str = "4f654582-33af-4e52-abfc-c35d46765ec4";
@@ -347,7 +347,8 @@ impl Objects {
         let window_class = Guid::parse(opening::WINDOW_CLASS).unwrap();
         let (mut doors, mut windows) = (Vec::new(), Vec::new());
         for (tag, role, target) in links(list) {
-            if tag == TAG_OWNS {
+            // Two or more openings of one kind come as one owns-many item.
+            if tag == TAG_OWNS || tag == TAG_OWNS_MANY {
                 let class = self.classes.get(&target);
                 if role == door_role && class == Some(&door_class) {
                     doors.push(target);

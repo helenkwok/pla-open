@@ -145,7 +145,7 @@ pub(crate) fn decode(
         reflected,
         o_side,
         ref_side,
-        host_wall,
+        host_wall: host_wall.flatten(),
         lib_part: lib_part.flatten(),
         notes,
     })

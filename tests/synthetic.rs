@@ -916,15 +916,25 @@ fn reads_doors_and_windows_by_class() {
     f.extend(raw_object(
         481,
         g(HOST),
-        &wall_payload(
-            &DEFAULT_WALL,
-            &links(&[
-                (0x11, role(DOOR_ROLE), g(DOOR)),
+        &wall_payload(&DEFAULT_WALL, &{
+            // Doors as one owns-many item (the form used when a wall hosts
+            // several), then single items.
+            let mut l = vec![1, 0, 0x01];
+            l.extend(role(DOOR_ROLE));
+            l.extend(1u32.to_le_bytes());
+            l.extend(g(DOOR));
+            for (tag, r, t) in [
                 (0x11, role(WINDOW_ROLE), g(WINDOW)),
                 // A window role pointing at a door is not a window.
                 (0x11, role(WINDOW_ROLE), g(DOOR)),
-            ]),
-        ),
+            ] {
+                l.push(tag);
+                l.extend(r);
+                l.extend(t);
+            }
+            l.push(0);
+            l
+        }),
     ));
     // Type 265 with another class is not a wall.
     f.extend(raw_object(
