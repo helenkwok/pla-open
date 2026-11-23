@@ -21,7 +21,8 @@ const TOP_LINK_ROLE: &str = "7b48cc47-7267-4cfd-9133-9214ea18fb99";
 /// Role of a top anchor's link to its story.
 const ANCHOR_STORY_ROLE: &str = "baf95b80-f256-4932-b891-03ff66848591";
 
-/// Position of the reference line across the wall.
+/// Position of the reference line across the wall. Codes 0 to 5 are the
+/// complete set; anything else is kept as `Other` and noted as invalid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReferenceLine {
     Outside,
@@ -71,6 +72,8 @@ impl From<u16> for Structure {
 pub enum Geometry {
     Straight,
     Trapezoid,
+    /// Code 2, inferred from the documented order (not yet seen in a file).
+    Polygonal,
     Other(u8),
 }
 
@@ -79,6 +82,7 @@ impl From<u8> for Geometry {
         match n {
             0 => Geometry::Straight,
             1 => Geometry::Trapezoid,
+            2 => Geometry::Polygonal,
             n => Geometry::Other(n),
         }
     }
@@ -131,16 +135,17 @@ pub struct Wall {
     /// the story levels: top level + top offset - home level - bottom offset.
     pub height: Option<f64>,
     pub bottom_offset: f64,
-    /// Offset of the top from the story the top is linked to (0 when not linked).
-    pub top_offset: f64,
+    /// Offset of the top from the story the top is linked to; none when not linked.
+    pub top_offset: Option<f64>,
     /// True when the wall top is linked to a story.
     pub top_linked: bool,
     pub home_story: Option<Guid>,
-    pub home_story_index: Option<u16>,
+    pub home_story_index: Option<i16>,
     pub home_story_name: Option<String>,
     /// Index of the story the top is linked to.
-    pub top_story_index: Option<u16>,
+    pub top_story_index: Option<i16>,
     /// Top story index minus home story index; 0 when the top is not linked.
+    /// A negative value is invalid and is noted in `notes`.
     pub relative_top_story: Option<i32>,
     pub reference_line: ReferenceLine,
     /// Offset of the wall from its reference line.
@@ -159,6 +164,9 @@ pub struct Wall {
     pub profile: Profile,
     /// Slant angle, only for a slanted profile.
     pub slant_alpha: Option<f64>,
+    /// Things in the record that a valid file should not contain. The wall is
+    /// still read; each note says which reading was taken.
+    pub notes: Vec<String>,
 }
 
 /// The objects walls and stories are read from, gathered in one walk.
@@ -166,11 +174,12 @@ pub(crate) struct Objects {
     types: HashMap<Guid, i16>,
     walls: Vec<(Guid, Vec<u8>)>,
     /// Story object GUID -> (story index, name).
-    story_objects: HashMap<Guid, (u16, String)>,
+    story_objects: HashMap<Guid, (i16, String)>,
     /// Top anchor GUID -> GUID of its story object.
     anchors: HashMap<Guid, Guid>,
-    /// Composite attribute index -> (GUID, name).
-    composites: HashMap<i32, (Guid, String)>,
+    /// Composite attribute index -> every (GUID, name) with that index
+    /// (more than one should not happen: indices are unique).
+    composites: HashMap<i32, Vec<(Guid, String)>>,
     pub stories: Vec<Story>,
 }
 
@@ -222,13 +231,15 @@ impl Objects {
                 }
                 COMPOSITE_TYPE => {
                     if let Some((i, name)) = parse_composite(&b.payload()?) {
-                        o.composites.entry(i).or_insert((g, name));
+                        o.composites.entry(i).or_default().push((g, name));
                     }
                 }
                 STORY_TABLE_TYPE => {
                     tables += 1;
                     if tables > 1 {
-                        return Err(Error::Unsupported("more than one story table"));
+                        return Err(Error::Unsupported(
+                            "more than one story table (probably hotlink modules)",
+                        ));
                     }
                     o.stories = story::parse_table(&b.payload()?)?;
                 }
@@ -246,7 +257,7 @@ impl Objects {
             .collect()
     }
 
-    fn level(&self, index: u16) -> Option<f64> {
+    fn level(&self, index: i16) -> Option<f64> {
         self.stories
             .iter()
             .find(|s| s.index == index)
@@ -270,6 +281,7 @@ impl Objects {
 
         let home_role = Guid::parse(HOME_STORY_ROLE).unwrap();
         let top_role = Guid::parse(TOP_LINK_ROLE).unwrap();
+        let mut notes = Vec::new();
         let mut home_story = None;
         let mut top_anchor = None;
         for (tag, role, target) in links(list) {
@@ -277,10 +289,17 @@ impl Objects {
                 continue;
             }
             let ty = self.types.get(&target);
-            if role == home_role && ty == Some(&STORY_TYPE) {
-                home_story = home_story.or(Some(target));
+            let (slot, what) = if role == home_role && ty == Some(&STORY_TYPE) {
+                (&mut home_story, "home story")
             } else if role == top_role && ty == Some(&TOP_ANCHOR_TYPE) {
-                top_anchor = top_anchor.or(Some(target));
+                (&mut top_anchor, "top")
+            } else {
+                continue;
+            };
+            if slot.is_some() {
+                notes.push(format!("more than one {what} link; the first is used"));
+            } else {
+                *slot = Some(target);
             }
         }
         let home = home_story.and_then(|g| self.story_objects.get(&g));
@@ -292,26 +311,47 @@ impl Objects {
         let top_linked = top_anchor.is_some();
 
         let bottom_offset = f(0xA1);
-        let top_offset = f(0x91);
-        let (height, relative_top_story) = if top_linked {
-            match (home_story_index, top_story_index) {
-                (Some(h), Some(t)) => (
-                    self.level(t)
-                        .zip(self.level(h))
-                        .map(|(lt, lh)| lt + top_offset - lh - bottom_offset),
-                    Some(i32::from(t) - i32::from(h)),
-                ),
-                _ => (None, None),
-            }
-        } else {
-            (Some(f(0x99)), Some(0))
+        // The stored top offset means nothing unless the top is linked.
+        let top_offset = top_linked.then(|| f(0x91));
+        let (height, relative_top_story) = match (top_offset, home_story_index, top_story_index) {
+            (None, ..) => (Some(f(0x99)), Some(0)),
+            (Some(off), Some(h), Some(t)) => (
+                self.level(t)
+                    .zip(self.level(h))
+                    .map(|(lt, lh)| lt + off - lh - bottom_offset),
+                Some(i32::from(t) - i32::from(h)),
+            ),
+            _ => (None, None),
         };
+        if let Some(r) = relative_top_story.filter(|&r| r < 0) {
+            notes.push(format!(
+                "relative top story {r} is invalid (the top is below the home story)"
+            ));
+        }
 
         let structure = Structure::from(u16_at(p, e + 0xE1).unwrap());
         let composite_index =
             (structure == Structure::Composite).then(|| i32_at(p, e + 0xE5).unwrap());
-        let composite = composite_index.and_then(|i| self.composites.get(&i));
+        let composite = match composite_index.and_then(|i| self.composites.get(&i)) {
+            Some(c) if c.len() > 1 => {
+                notes.push(format!(
+                    "{} composites share index {}; none is used",
+                    c.len(),
+                    composite_index.unwrap()
+                ));
+                None
+            }
+            c => c.and_then(|c| c.first()),
+        };
         let profile = Profile::from(u16_at(p, e + 0xB8).unwrap());
+        let reference_line = ReferenceLine::from(u32_at(p, e + 0xEF).unwrap());
+        if let ReferenceLine::Other(n) = reference_line {
+            notes.push(format!("reference line code {n} is invalid (0 to 5)"));
+        }
+        let flipped = p[e + 0xEE];
+        if flipped > 1 {
+            notes.push(format!("flipped byte is {flipped}, read as flipped"));
+        }
 
         Ok(Wall {
             guid,
@@ -329,10 +369,10 @@ impl Objects {
             home_story_name: home.map(|s| s.1.clone()),
             top_story_index,
             relative_top_story,
-            reference_line: ReferenceLine::from(u32_at(p, e + 0xEF).unwrap()),
+            reference_line,
             reference_line_offset: f(0x5D),
             offset_from_outside: f(0xF3),
-            flipped: p[e + 0xEE] != 0,
+            flipped: flipped != 0,
             structure,
             composite_index,
             composite_name: composite.map(|c| c.1.clone()),
@@ -341,6 +381,7 @@ impl Objects {
             arc_angle: f(0x75),
             profile,
             slant_alpha: (profile == Profile::Slanted).then(|| f(0xBA)),
+            notes,
         })
     }
 }
