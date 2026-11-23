@@ -25,6 +25,8 @@ const SIGNATURE: &[u8; 8] = b"ROF FDB ";
 const SECTION_MARKER: [u8; 16] = [
     0x79, 0xa8, 0xa9, 0x96, 0x45, 0xb4, 0x4a, 0xf3, 0x98, 0x38, 0x33, 0xc3, 0x3a, 0x06, 0x1b, 0x06,
 ];
+/// Decoded bytes per section chunk (all but the last chunk hold exactly this).
+const SECTION_CHUNK: usize = 1 << 20;
 /// Block type of a free block: leftover bytes, never parsed.
 pub const FREE_BLOCK: i16 = -36;
 
@@ -400,23 +402,53 @@ impl Pla {
         Ok(v)
     }
 
-    /// Read and decompress the section at `offset`. Returns (decoded bytes, stored length).
+    /// Read and decompress the section at `offset`: a header with the decoded
+    /// length and the chunk count, then one record (u32 size, one QuickLZ
+    /// chunk) per 1 MiB of decoded bytes. Returns (decoded bytes, stored length).
     fn read_section(&mut self, offset: u64) -> Result<(Vec<u8>, u64)> {
-        let h = self.read_at(offset, 36)?;
-        let ds = too_large(u64_at(&h, 16).unwrap())?;
-        let cs = u32_at(&h, 32).unwrap() as u64;
-        if offset + 36 + cs > self.size {
+        let h = self.read_at(offset, 32)?;
+        let ds = u64_at(&h, 16).unwrap();
+        let n = u64_at(&h, 24).unwrap();
+        if ds == 0 || n != ds.div_ceil(SECTION_CHUNK as u64) {
             return Err(Error::Corrupt(
-                "compressed section runs past the end of the file",
+                "section chunk count does not match its decoded length",
             ));
         }
-        let cs = too_large(cs)?;
-        let mut data = vec![0; cs];
-        self.file.read_exact(&mut data)?;
-        Ok((
-            quicklz::decompress(&data, ds, MAX_ITEM_BYTES)?,
-            36 + cs as u64,
-        ))
+        let ds = too_large(ds)?;
+        let mut out = Vec::with_capacity(ds);
+        let mut pos = offset + 32;
+        for _ in 0..n {
+            let mut cs = [0u8; 4];
+            if pos + 4 > self.size {
+                return Err(Error::Corrupt(
+                    "section chunk runs past the end of the file",
+                ));
+            }
+            self.file.read_exact(&mut cs)?;
+            let cs = u32::from_le_bytes(cs) as u64;
+            if pos + 4 + cs > self.size {
+                return Err(Error::Corrupt(
+                    "section chunk runs past the end of the file",
+                ));
+            }
+            let mut chunk = vec![0; too_large(cs)?];
+            self.file.read_exact(&mut chunk)?;
+            let want = SECTION_CHUNK.min(ds - out.len());
+            let (size, dsize) = quicklz::chunk_sizes(&chunk)?;
+            if size as u64 != cs {
+                return Err(Error::Corrupt(
+                    "section chunk size does not match its QuickLZ header",
+                ));
+            }
+            if dsize != want {
+                return Err(Error::Corrupt(
+                    "section chunk does not decode to 1 MiB (or the remainder for the last)",
+                ));
+            }
+            out.extend_from_slice(&quicklz::decompress(&chunk, want, MAX_ITEM_BYTES)?);
+            pos += 4 + cs;
+        }
+        Ok((out, pos - offset))
     }
 
     /// Visit every live block in file order, including blocks inside
@@ -455,6 +487,9 @@ impl Pla {
                 st.sections += 1;
                 walk_section(&data, o, &mut st, &mut visit)?;
                 o = (o + stored).div_ceil(16) * 16;
+                if o > self.size {
+                    return Err(Error::Corrupt("file does not end on a 16-byte unit"));
+                }
             } else {
                 st.gap_units += 1;
                 o += 16;

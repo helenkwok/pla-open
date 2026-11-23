@@ -80,9 +80,7 @@ fn stored_chunk(data: &[u8]) -> Vec<u8> {
 
 /// A section holding `inner` as two stored chunks.
 fn section(inner: &[u8]) -> Vec<u8> {
-    let half = inner.len() / 2;
-    let mut chunks = stored_chunk(&inner[..half]);
-    chunks.extend(stored_chunk(&inner[half..]));
+    let chunks = stored_chunk(inner);
     let mut v = MARKER.to_vec();
     v.extend((inner.len() as u64).to_le_bytes());
     v.extend(1u64.to_le_bytes());
