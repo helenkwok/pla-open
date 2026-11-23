@@ -15,7 +15,7 @@ fn g(n: u8) -> [u8; 16] {
 }
 
 fn pad16(v: &mut Vec<u8>) {
-    while v.len() % 16 != 0 {
+    while !v.len().is_multiple_of(16) {
         v.push(0);
     }
 }
