@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use pla_open::{Pla, Result};
 use serde_json::json;
 
-const USAGE: &str = "usage: pla-open info FILE\n       pla-open walls FILE [--json]";
+const USAGE: &str = "usage: pla-open info FILE\n       pla-open stories FILE [--json]\n       pla-open walls FILE [--json]";
 
 fn info(path: &str) -> Result<()> {
     let mut pla = Pla::open(path)?;
@@ -47,17 +47,32 @@ fn walls(path: &str, as_json: bool) -> Result<()> {
                     "endThickness": w.end_thickness,
                     "height": w.height,
                     "bottomOffset": w.bottom_offset,
-                    "offsetFromOutside": w.offset_from_outside,
+                    "topOffset": w.top_offset,
                     "topLinked": w.top_linked,
                     "homeStory": w.home_story.map(|g| g.to_string()),
+                    "homeStoryIndex": w.home_story_index,
                     "homeStoryName": w.home_story_name,
+                    "topStoryIndex": w.top_story_index,
+                    "relativeTopStory": w.relative_top_story,
+                    "referenceLine": w.reference_line.to_string(),
+                    "referenceLineOffset": w.reference_line_offset,
+                    "offsetFromOutside": w.offset_from_outside,
+                    "flipped": w.flipped,
+                    "structure": w.structure.to_string(),
+                    "compositeIndex": w.composite_index,
+                    "compositeName": w.composite_name,
+                    "compositeGuid": w.composite_guid.map(|g| g.to_string()),
+                    "geometry": w.geometry.to_string(),
+                    "arcAngle": w.arc_angle,
+                    "profile": w.profile.to_string(),
+                    "slantAlpha": w.slant_alpha,
                 })
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&v).expect("JSON"));
     } else {
         for w in &walls {
-            let h = w.height.map_or("linked".to_string(), |h| h.to_string());
+            let h = w.height.map_or("?".to_string(), |h| h.to_string());
             println!(
                 "{} {:?} ({}, {}) -> ({}, {}) thickness {}/{} height {} story {}",
                 w.guid,
@@ -76,10 +91,38 @@ fn walls(path: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+fn stories(path: &str, as_json: bool) -> Result<()> {
+    let stories = Pla::open(path)?.stories()?;
+    if as_json {
+        let v: Vec<_> = stories
+            .iter()
+            .map(|s| {
+                json!({
+                    "index": s.index,
+                    "level": s.level,
+                    "height": s.height,
+                    "name": s.name,
+                    "virtual": s.is_virtual,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&v).expect("JSON"));
+    } else {
+        for s in &stories {
+            let h = s.height.map_or("?".to_string(), |h| h.to_string());
+            let v = if s.is_virtual { " (virtual)" } else { "" };
+            println!("{} level {} height {} {:?}{v}", s.index, s.level, h, s.name);
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let r = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["info", f] => info(f),
+        ["stories", f] => stories(f, false),
+        ["stories", f, "--json"] | ["stories", "--json", f] => stories(f, true),
         ["walls", f] => walls(f, false),
         ["walls", f, "--json"] | ["walls", "--json", f] => walls(f, true),
         _ => {

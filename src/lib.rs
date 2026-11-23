@@ -2,7 +2,8 @@
 //!
 //! The file is a header followed by 16-byte units holding blocks, compressed
 //! sections and gap units. [`Pla::walk`] visits every live block without
-//! loading the whole file; [`Pla::walls`] decodes walls.
+//! loading the whole file; [`Pla::stories`] and [`Pla::walls`] decode stories
+//! and walls.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -11,9 +12,11 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 mod quicklz;
+mod story;
 mod wall;
 
-pub use wall::Wall;
+pub use story::Story;
+pub use wall::{Geometry, Profile, ReferenceLine, Structure, Wall};
 
 /// Largest block, section or decoded payload we accept, in bytes.
 pub const MAX_ITEM_BYTES: usize = 256 << 20;
@@ -172,12 +175,100 @@ fn u32_at(b: &[u8], o: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?))
 }
 
+fn i32_at(b: &[u8], o: usize) -> Option<i32> {
+    u32_at(b, o).map(|v| v as i32)
+}
+
 fn u64_at(b: &[u8], o: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?))
 }
 
 fn f64_at(b: &[u8], o: usize) -> Option<f64> {
     u64_at(b, o).map(f64::from_bits)
+}
+
+/// Parts of an object payload: (type-specific data, link list bytes).
+fn split_object(p: &[u8]) -> Result<(&[u8], &[u8])> {
+    let bad = || Error::Corrupt("object payload shorter than its stated parts");
+    let n1 = u32_at(p, 35).ok_or_else(bad)? as usize;
+    let data = p.get(39..39 + n1).ok_or_else(bad)?;
+    let n2 = u32_at(p, 39 + n1).ok_or_else(bad)? as usize;
+    let links = p.get(43 + n1..43 + n1 + n2).ok_or_else(bad)?;
+    Ok((data, links))
+}
+
+/// Link tag: this object owns the listed targets under one role.
+const TAG_OWNS_MANY: u8 = 0x01;
+/// Link tag: this object owns the target.
+const TAG_OWNS: u8 = 0x11;
+/// Link tag: this object is owned by (points up to) the target.
+const TAG_OWNED_BY: u8 = 0x12;
+
+/// Link list items `(tag, role, target)`, stopping at the end mark or an
+/// unknown tag. A `0x01` item gives one entry per listed target.
+fn links(list: &[u8]) -> Vec<(u8, Guid, Guid)> {
+    let mut v = Vec::new();
+    if list.get(0..2) != Some(&[1, 0][..]) {
+        return v;
+    }
+    let mut i = 2;
+    while let Some(&tag) = list.get(i) {
+        match tag {
+            TAG_OWNS | TAG_OWNED_BY => {
+                let Some(item) = list.get(i..i + 33) else {
+                    break;
+                };
+                v.push((
+                    tag,
+                    Guid::from_slice(&item[1..17]),
+                    Guid::from_slice(&item[17..33]),
+                ));
+                i += 33;
+            }
+            TAG_OWNS_MANY => {
+                let Some(n) = u32_at(list, i + 17) else {
+                    break;
+                };
+                let start = i + 21;
+                let Some(targets) = (n as usize)
+                    .checked_mul(16)
+                    .and_then(|len| list.get(start..start.checked_add(len)?))
+                else {
+                    break;
+                };
+                let role = Guid::from_slice(&list[i + 1..i + 17]);
+                v.extend(
+                    targets
+                        .as_chunks::<16>()
+                        .0
+                        .iter()
+                        .map(|t| (tag, role, Guid(*t))),
+                );
+                i = start + targets.len();
+            }
+            _ => break,
+        }
+    }
+    v
+}
+
+/// UTF-16LE text.
+fn utf16(b: &[u8]) -> Option<String> {
+    let units: Vec<u16> = b
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+/// A u32 count of UTF-16 code units at `o`, then the units. Returns the text
+/// and the offset just after it.
+fn counted_utf16(b: &[u8], o: usize) -> Option<(String, usize)> {
+    let n = u32_at(b, o)? as usize;
+    let end = (o + 4).checked_add(n.checked_mul(2)?)?;
+    Some((utf16(b.get(o + 4..end)?)?, end))
 }
 
 fn is_block_tag(b: &[u8]) -> bool {
@@ -399,9 +490,14 @@ impl Pla {
         }
     }
 
+    /// Decode the story table (the last entry is the virtual story above the top one).
+    pub fn stories(&mut self) -> Result<Vec<Story>> {
+        Ok(wall::Objects::read(self)?.stories)
+    }
+
     /// Decode every wall in the file.
     pub fn walls(&mut self) -> Result<Vec<Wall>> {
-        wall::read_walls(self)
+        wall::Objects::read(self)?.walls()
     }
 }
 
