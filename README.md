@@ -5,8 +5,10 @@ An open-source reader for Archicad project files (`.pln` and `.pla`), written in
 ## What it reads
 
 - **The container.** It checks the file signature, walks the whole file (blocks, compressed sections and the empty units between them) and decodes block payloads stored raw, with a zero mask, or with QuickLZ level 1. Every block can be listed by type and GUID.
-- **Stories.** The story table: index, level, height and name of each story, plus the extra story above the top one that the file keeps to give the top story its height.
-- **Walls.** For each wall: element ID, start and end points, thickness at each end, height, bottom offset, home story, and for a wall whose top is linked to a story the top story, the top offset and the height worked out from the story levels. Also the reference line (outside, center, inside, or the same three for the core) with its offset and its distance from the outside face, whether the wall is flipped, basic or composite structure with the composite's name, straight or trapezoid plan, the arc angle of a curved wall, and normal or slanted profile with the slant angle.
+- **Stories.** The story table: index (negative for stories below ground), level, height and name of each story, plus the extra story above the top one that the file keeps to give the top story its height.
+- **Walls.** For each wall: element ID, start and end points, thickness at each end, height, bottom offset, home story, and for a wall whose top is linked to a story the top story, the top offset and the height worked out from the story levels. Also the reference line (outside, center, inside, or the same three for the core) with its offset and its distance from the outside face, whether the wall is flipped, basic or composite structure with the composite's name, straight, trapezoid or polygonal plan, the arc angle of a curved wall, and normal or slanted profile with the slant angle.
+
+Values a valid project should not hold (a reference line code above 5, a top linked below the home story, two composites with one index, a second home or top link, a flipped flag other than 0 or 1) do not stop the reader: the wall is still read and each problem is listed in its `notes`. The top offset is reported only for a wall whose top is linked. A file with more than one story table (probably from hotlinked modules) is reported as not supported yet.
 
 It reads the file as a stream and caps every block, section and decoded payload at 256 MiB, so a large or damaged file gives a clear error instead of filling memory.
 

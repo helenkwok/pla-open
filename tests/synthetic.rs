@@ -222,7 +222,7 @@ fn wall_payload(w: &WallIn, list: &[u8]) -> Vec<u8> {
 }
 
 /// Story object (type 210): constant prefix, name at payload offset 49, then the index.
-fn story_payload(index: u16, name: &str, list: &[u8]) -> Vec<u8> {
+fn story_payload(index: i16, name: &str, list: &[u8]) -> Vec<u8> {
     object_payload(
         49 + text_len(name) + 5,
         |p| {
@@ -236,7 +236,7 @@ fn story_payload(index: u16, name: &str, list: &[u8]) -> Vec<u8> {
 }
 
 /// Story table (type 224) with records (index, level, name).
-fn story_table_payload(records: &[(u16, f64, &str)]) -> Vec<u8> {
+fn story_table_payload(records: &[(i16, f64, &str)]) -> Vec<u8> {
     let mut t = vec![1, 0, 3, 0, 0, 1, 0, records.len() as u8];
     for (i, (index, level, name)) in records.iter().enumerate() {
         t.extend(index.to_le_bytes());
@@ -363,6 +363,8 @@ fn build() -> Vec<u8> {
         thick: [0.2, 0.25],
         height: 2.5,
         bottom: 0.5,
+        // Stored but meaningless: the top is not linked.
+        top_offset: 0.7,
         offset: 0.1,
         arc: 0.5,
         geometry: 1,
@@ -510,7 +512,8 @@ fn reads_walls() {
     assert_eq!(a.home_story_name.as_deref(), Some("Ground Floor"));
     assert_eq!(a.top_story_index, Some(1));
     assert_eq!(a.relative_top_story, Some(1));
-    assert_eq!(a.top_offset, 0.4);
+    assert_eq!(a.top_offset, Some(0.4));
+    assert!(a.notes.is_empty());
     assert_eq!(a.bottom_offset, 0.1);
     // 3.5 + 0.4 - 0 - 0.1
     assert!((a.height.unwrap() - 3.8).abs() < 1e-12);
@@ -536,6 +539,8 @@ fn reads_walls() {
     assert_eq!(b.height, Some(2.5));
     assert_eq!(b.bottom_offset, 0.5);
     assert_eq!(b.relative_top_story, Some(0));
+    assert_eq!(b.top_offset, None);
+    assert!(b.notes.is_empty());
     assert_eq!(b.top_story_index, None);
     assert_eq!(b.home_story_name.as_deref(), Some("Ground Floor"));
     assert_eq!(b.reference_line, ReferenceLine::Center);
@@ -560,6 +565,7 @@ fn reads_walls() {
     // 6.5 - 0.25 - 3.5 - 0
     assert!((c.height.unwrap() - 2.75).abs() < 1e-12);
     assert_eq!(c.reference_line, ReferenceLine::CoreInside);
+    assert!(c.notes.is_empty());
     assert_eq!((c.begin, c.end), ([0.0, 0.0], [1.0, 0.0]));
 }
 
@@ -682,4 +688,155 @@ fn guid_text_round_trip() {
     assert_eq!(&guid.0[..4], &[0x82, 0x45, 0x65, 0x4f]);
     assert_eq!(guid.to_string(), s);
     assert_eq!(Guid::parse(&s.to_uppercase()), Some(guid));
+}
+
+/// Stories -1 (basement), 0 and 1 (virtual), with walls that break documented rules.
+fn odd_file() -> Vec<u8> {
+    const BASEMENT: u8 = 20;
+    const GROUND: u8 = 21;
+    const VIRTUAL: u8 = 22;
+    const TOP_GROUND: u8 = 23;
+    const TOP_BASEMENT: u8 = 24;
+    const DUP_A: u8 = 25;
+    const DUP_B: u8 = 26;
+    let mut f = header();
+    for (guid, index, name) in [
+        (BASEMENT, -1, "Basement"),
+        (GROUND, 0, "Ground"),
+        (VIRTUAL, 1, ""),
+    ] {
+        f.extend(raw_object(
+            210,
+            g(guid),
+            &story_payload(index, name, &links(&[])),
+        ));
+    }
+    f.extend(raw_object(
+        204,
+        g(TOP_GROUND),
+        &anchor_payload(GROUND, &[30]),
+    ));
+    f.extend(raw_object(
+        204,
+        g(TOP_BASEMENT),
+        &anchor_payload(BASEMENT, &[31]),
+    ));
+    f.extend(raw_object(
+        224,
+        g(TABLE),
+        &story_table_payload(&[(-1, -3.0, "Basement"), (0, 0.0, "Ground"), (1, 3.0, "")]),
+    ));
+    f.extend(raw_object(137, g(DUP_A), &composite_payload(23, "A")));
+    f.extend(raw_object(137, g(DUP_B), &composite_payload(23, "B")));
+    // 30: on the basement, top linked to the ground story; second home link.
+    f.extend(raw_object(
+        265,
+        g(30),
+        &wall_payload(
+            &WallIn {
+                top_offset: 0.5,
+                ..DEFAULT_WALL
+            },
+            &links(&[
+                (0x12, home_role(), g(BASEMENT)),
+                (0x12, home_role(), g(GROUND)),
+                (0x12, top_role(), g(TOP_GROUND)),
+            ]),
+        ),
+    ));
+    // 31: on the ground story, top linked to the basement (negative relative top story),
+    // invalid reference line code, flipped byte 2.
+    f.extend(raw_object(
+        265,
+        g(31),
+        &wall_payload(
+            &WallIn {
+                ref_line: 7,
+                flipped: 2,
+                ..DEFAULT_WALL
+            },
+            &links(&[
+                (0x12, home_role(), g(GROUND)),
+                (0x12, top_role(), g(TOP_BASEMENT)),
+            ]),
+        ),
+    ));
+    f
+}
+
+#[test]
+fn negative_story_indices() {
+    let path = write("negative-stories", &odd_file());
+    let mut pla = Pla::open(&path).unwrap();
+    let stories = pla.stories().unwrap();
+    let walls = pla.walls().unwrap();
+    std::fs::remove_file(path).unwrap();
+    let got: Vec<_> = stories
+        .iter()
+        .map(|s| (s.index, s.level, s.height, s.is_virtual))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (-1, -3.0, Some(3.0), false),
+            (0, 0.0, Some(3.0), false),
+            (1, 3.0, None, true),
+        ]
+    );
+    let w = &walls[0];
+    assert_eq!(w.home_story_index, Some(-1));
+    assert_eq!(w.home_story_name.as_deref(), Some("Basement"));
+    assert_eq!(w.top_story_index, Some(0));
+    assert_eq!(w.relative_top_story, Some(1));
+    // 0 + 0.5 - (-3) - 0
+    assert!((w.height.unwrap() - 3.5).abs() < 1e-12);
+    // The second home link is noted; the first one wins.
+    assert_eq!(
+        w.notes,
+        ["more than one home story link; the first is used"]
+    );
+}
+
+#[test]
+fn rule_breaks_are_noted_not_fatal() {
+    let path = write("rule-breaks", &odd_file());
+    let walls = Pla::open(&path).unwrap().walls().unwrap();
+    std::fs::remove_file(path).unwrap();
+    let w = &walls[1];
+    assert_eq!(w.relative_top_story, Some(-1));
+    assert_eq!(w.reference_line, ReferenceLine::Other(7));
+    assert_eq!(w.reference_line.to_string(), "7");
+    assert!(w.flipped);
+    // Two composites with index 23: neither is picked.
+    assert_eq!(w.composite_index, Some(23));
+    assert_eq!((w.composite_name.as_ref(), w.composite_guid), (None, None));
+    assert_eq!(
+        w.notes,
+        [
+            "relative top story -1 is invalid (the top is below the home story)",
+            "2 composites share index 23; none is used",
+            "reference line code 7 is invalid (0 to 5)",
+            "flipped byte is 2, read as flipped",
+        ]
+    );
+}
+
+#[test]
+fn second_story_table_is_not_supported() {
+    let mut f = odd_file();
+    f.extend(raw_object(
+        224,
+        g(99),
+        &story_table_payload(&[(0, 0.0, "")]),
+    ));
+    let path = write("two-tables", &f);
+    let e = Pla::open(&path).unwrap().stories().unwrap_err();
+    std::fs::remove_file(path).unwrap();
+    assert!(e.to_string().contains("hotlink modules"), "{e}");
+}
+
+#[test]
+fn geometry_codes() {
+    assert_eq!(Geometry::from(2), Geometry::Polygonal);
+    assert_eq!(Geometry::from(9).to_string(), "9");
 }

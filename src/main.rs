@@ -66,6 +66,7 @@ fn walls(path: &str, as_json: bool) -> Result<()> {
                     "arcAngle": w.arc_angle,
                     "profile": w.profile.to_string(),
                     "slantAlpha": w.slant_alpha,
+                    "notes": w.notes,
                 })
             })
             .collect();
@@ -86,6 +87,9 @@ fn walls(path: &str, as_json: bool) -> Result<()> {
                 h,
                 w.home_story_name.as_deref().unwrap_or("?")
             );
+            for n in &w.notes {
+                println!("  note: {n}");
+            }
         }
     }
     Ok(())

@@ -13,7 +13,7 @@ fn close(a: f64, b: &Value) -> bool {
 /// Fields missing from the details are not compared.
 fn compare_wall(w: &Wall, e: &Value) -> Vec<String> {
     let x = &e["details"];
-    let mut bad = Vec::new();
+    let mut bad: Vec<String> = w.notes.iter().map(|n| format!("note: {n}")).collect();
     if e["id"].as_str() != Some(w.id.as_str()) {
         bad.push(format!("id {:?}", w.id));
     }
@@ -36,7 +36,12 @@ fn compare_wall(w: &Wall, e: &Value) -> Vec<String> {
     );
     num("end thickness", Some(w.end_thickness), &x["endThickness"]);
     num("bottom offset", Some(w.bottom_offset), &x["bottomOffset"]);
-    num("top offset", Some(w.top_offset), &x["topOffset"]);
+    // The API reports 0 for an unlinked wall; the reader reports none.
+    num(
+        "top offset",
+        Some(w.top_offset.unwrap_or(0.0)),
+        &x["topOffset"],
+    );
     num("height", w.height, &x["height"]);
     num("offset", Some(w.reference_line_offset), &x["offset"]);
     num(
@@ -132,7 +137,7 @@ fn walls_and_stories_match_details() {
             let real: Vec<_> = stories.iter().filter(|s| !s.is_virtual).collect();
             let same = real.len() == expected.len()
                 && real.iter().zip(expected).all(|(s, x)| {
-                    x["index"].as_u64() == Some(s.index.into())
+                    x["index"].as_i64() == Some(s.index.into())
                         && close(s.level, &x["level"])
                         && s.height.is_some_and(|h| close(h, &x["height"]))
                         && x["name"].as_str() == Some(s.name.as_str())
