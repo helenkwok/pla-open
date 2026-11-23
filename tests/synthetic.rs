@@ -1,6 +1,8 @@
 //! Builds small files from the documented byte layouts and reads them back.
 
-use pla_open::{Error, Geometry, Guid, Location, Pla, Profile, ReferenceLine, Structure};
+use pla_open::{
+    Error, Geometry, Guid, Location, OpeningKind, Pla, Profile, ReferenceLine, Structure,
+};
 
 const MARKER: [u8; 16] = [
     0x79, 0xa8, 0xa9, 0x96, 0x45, 0xb4, 0x4a, 0xf3, 0x98, 0x38, 0x33, 0xc3, 0x3a, 0x06, 0x1b, 0x06,
@@ -187,7 +189,15 @@ fn text_len(s: &str) -> usize {
     4 + 2 * s.encode_utf16().count()
 }
 
+const WALL_CLASS: &str = "4f654582-33af-4e52-abfc-c35d46765ec4";
+
 fn wall_payload(w: &WallIn, list: &[u8]) -> Vec<u8> {
+    let mut p = wall_payload_of_class(w, list);
+    p[0..16].copy_from_slice(&role(WALL_CLASS));
+    p
+}
+
+fn wall_payload_of_class(w: &WallIn, list: &[u8]) -> Vec<u8> {
     let e = 0xF0 + text_len(w.id);
     object_payload(
         e + 0x110,
@@ -841,4 +851,208 @@ fn second_story_table_is_not_supported() {
 fn geometry_codes() {
     assert_eq!(Geometry::from(2), Geometry::Polygonal);
     assert_eq!(Geometry::from(9).to_string(), "9");
+}
+
+const DOOR_CLASS: &str = "d8f07689-9cfa-4fbe-aeb4-0a60b8e667ee";
+const WINDOW_CLASS: &str = "93f161a0-4c4e-4df7-a100-4fd0e8c4f1e1";
+const LIB_REF_CLASS: &str = "2bfca33d-bd38-49e3-bf6d-52ac8b850b9f";
+const DOOR_ROLE: &str = "1f6bfe02-d60c-40ae-9ac8-c3953ce12814";
+const WINDOW_ROLE: &str = "c54379e6-afd0-4b9a-9887-af5baeeccf84";
+/// Only the first group of this role is documented; the rest is made up.
+const LIB_ROLE: &str = "672f1c46-0000-4000-8000-000000000001";
+
+struct OpeningIn<'a> {
+    class: &'a str,
+    id: &'a str,
+    flags: [u8; 3],
+    width: f64,
+    height: f64,
+    center: f64,
+    sill: f64,
+}
+
+/// Door or window record: flags at 0xF8, sizes at 0xFD/0x105, element ID at
+/// 0x151, centre offset at E + 0x18 and sill at E + 0x40.
+fn opening_payload(o: &OpeningIn, list: &[u8]) -> Vec<u8> {
+    let e = 0x151 + text_len(o.id);
+    let mut p = object_payload(
+        e + 0xE0,
+        |p| {
+            p[0xF8..0xFB].copy_from_slice(&o.flags);
+            p[0xFD..0x105].copy_from_slice(&o.width.to_le_bytes());
+            p[0x105..0x10D].copy_from_slice(&o.height.to_le_bytes());
+            // Unidentified field, 0.1 in every record seen; must not be read as the sill.
+            p[0x147..0x14F].copy_from_slice(&0.1f64.to_le_bytes());
+            put_text(p, 0x151, o.id);
+            p[e + 0x18..e + 0x20].copy_from_slice(&o.center.to_le_bytes());
+            p[e + 0x40..e + 0x48].copy_from_slice(&o.sill.to_le_bytes());
+        },
+        list,
+    );
+    p[0..16].copy_from_slice(&role(o.class));
+    p
+}
+
+/// Library-part reference: the library part ID at payload offset 51.
+fn lib_ref_payload(id: [u8; 16]) -> Vec<u8> {
+    let mut p = object_payload(80, |p| p[51..67].copy_from_slice(&id), &links(&[]));
+    p[0..16].copy_from_slice(&role(LIB_REF_CLASS));
+    p
+}
+
+#[test]
+fn reads_doors_and_windows_by_class() {
+    const HOST: u8 = 30;
+    const DOOR: u8 = 31;
+    const WINDOW: u8 = 32;
+    const DOOR_LIB: u8 = 33;
+    const WINDOW_LIB: u8 = 34;
+    const NOT_A_WALL: u8 = 35;
+    const LIB_ID_D: u8 = 36;
+    const LIB_ID_W: u8 = 37;
+
+    let mut f = header();
+    // Block type numbers from about 470 up are given out per file: only the class counts.
+    f.extend(raw_object(
+        481,
+        g(HOST),
+        &wall_payload(&DEFAULT_WALL, &{
+            // Doors as one owns-many item (the form used when a wall hosts
+            // several), then single items.
+            let mut l = vec![1, 0, 0x01];
+            l.extend(role(DOOR_ROLE));
+            l.extend(1u32.to_le_bytes());
+            l.extend(g(DOOR));
+            for (tag, r, t) in [
+                (0x11, role(WINDOW_ROLE), g(WINDOW)),
+                // A window role pointing at a door is not a window.
+                (0x11, role(WINDOW_ROLE), g(DOOR)),
+            ] {
+                l.push(tag);
+                l.extend(r);
+                l.extend(t);
+            }
+            l.push(0);
+            l
+        }),
+    ));
+    // Type 265 with another class is not a wall.
+    f.extend(raw_object(
+        265,
+        g(NOT_A_WALL),
+        &wall_payload_of_class(&DEFAULT_WALL, &links(&[])),
+    ));
+    // The door's link list starts with a 0x02 list item, which must not stop the parse.
+    let mut door_list = vec![1, 0, 0x02];
+    door_list.extend([9; 16]);
+    door_list.extend(2u32.to_le_bytes());
+    door_list.extend(g(60));
+    door_list.extend(g(61));
+    for (tag, r, t) in [
+        // Same role, but the target is not a wall: ignored.
+        (0x12, role(DOOR_ROLE), g(NOT_A_WALL)),
+        (0x12, role(DOOR_ROLE), g(HOST)),
+        (0x11, role(LIB_ROLE), g(DOOR_LIB)),
+    ] {
+        door_list.push(tag);
+        door_list.extend(r);
+        door_list.extend(t);
+    }
+    door_list.push(0);
+    let door = OpeningIn {
+        class: DOOR_CLASS,
+        id: "Tür-1",
+        flags: [1, 0, 1],
+        width: 0.9,
+        height: 2.1,
+        center: 0.8,
+        sill: 0.15,
+    };
+    f.extend(raw_object(
+        476,
+        g(DOOR),
+        &opening_payload(&door, &door_list),
+    ));
+    let window = OpeningIn {
+        class: WINDOW_CLASS,
+        id: "",
+        flags: [0, 2, 0],
+        width: 1.5,
+        height: 1.0,
+        center: 3.0,
+        sill: 1.2,
+    };
+    // A door role on a window does not make the wall its host.
+    let window_list = links(&[
+        (0x12, role(DOOR_ROLE), g(HOST)),
+        (0x12, role(WINDOW_ROLE), g(HOST)),
+        (0x11, role(LIB_ROLE), g(WINDOW_LIB)),
+    ]);
+    let mut inner = zero_mask_object(475, g(WINDOW), &opening_payload(&window, &window_list));
+    inner.extend(raw_object(477, g(DOOR_LIB), &lib_ref_payload(g(LIB_ID_D))));
+    inner.extend(raw_object(
+        478,
+        g(WINDOW_LIB),
+        &lib_ref_payload(g(LIB_ID_W)),
+    ));
+    f.extend(section(&inner));
+
+    let path = write("openings", &f);
+    let mut pla = Pla::open(&path).unwrap();
+    let (walls, openings) = pla.walls_and_openings().unwrap();
+    std::fs::remove_file(path).unwrap();
+
+    assert_eq!(walls.len(), 1);
+    assert_eq!(walls[0].guid, Guid(g(HOST)));
+    assert_eq!(walls[0].doors, vec![Guid(g(DOOR))]);
+    assert_eq!(walls[0].windows, vec![Guid(g(WINDOW))]);
+
+    assert_eq!(openings.len(), 2);
+    let d = &openings[0];
+    assert_eq!(d.guid, Guid(g(DOOR)));
+    assert_eq!(d.kind, OpeningKind::Door);
+    assert_eq!(d.id, "Tür-1");
+    assert_eq!((d.width, d.height), (0.9, 2.1));
+    assert_eq!((d.center_offset, d.sill_height), (0.8, 0.15));
+    assert_eq!((d.reflected, d.o_side, d.ref_side), (true, false, true));
+    assert_eq!(d.host_wall, Some(Guid(g(HOST))));
+    assert_eq!(d.lib_part, Some(Guid(g(LIB_ID_D))));
+    assert!(d.notes.is_empty(), "{:?}", d.notes);
+
+    let w = &openings[1];
+    assert_eq!(w.guid, Guid(g(WINDOW)));
+    assert_eq!(w.kind, OpeningKind::Window);
+    assert_eq!(w.id, "");
+    assert_eq!((w.width, w.height), (1.5, 1.0));
+    assert_eq!((w.center_offset, w.sill_height), (3.0, 1.2));
+    assert_eq!((w.reflected, w.o_side, w.ref_side), (false, true, false));
+    assert_eq!(w.host_wall, Some(Guid(g(HOST))));
+    assert_eq!(w.lib_part, Some(Guid(g(LIB_ID_W))));
+    assert_eq!(w.notes, vec!["oSide byte is 2, read as set".to_string()]);
+}
+
+#[test]
+fn short_opening_record_is_an_error() {
+    let o = OpeningIn {
+        class: DOOR_CLASS,
+        id: "D",
+        flags: [0; 3],
+        width: 1.0,
+        height: 2.0,
+        center: 1.0,
+        sill: 0.0,
+    };
+    let full = opening_payload(&o, &links(&[]));
+    // Cut the type-specific data just before the sill.
+    let e = 0x151 + text_len("D");
+    let mut p = full[..e + 0x40].to_vec();
+    p[35..39].copy_from_slice(&((e + 0x40 - 39) as u32).to_le_bytes());
+    p.extend(3u32.to_le_bytes());
+    p.extend([1, 0, 0]);
+    let mut f = header();
+    f.extend(raw_object(476, g(40), &p));
+    let path = write("short-opening", &f);
+    let r = Pla::open(&path).unwrap().openings();
+    std::fs::remove_file(path).unwrap();
+    assert!(matches!(r, Err(Error::Corrupt(_))));
 }

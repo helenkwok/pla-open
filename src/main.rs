@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use pla_open::{Pla, Result};
 use serde_json::json;
 
-const USAGE: &str = "usage: pla-open info FILE\n       pla-open stories FILE [--json]\n       pla-open walls FILE [--json]";
+const USAGE: &str = "usage: pla-open info FILE\n       pla-open stories FILE [--json]\n       pla-open walls FILE [--json]\n       pla-open openings FILE [--json]";
 
 fn info(path: &str) -> Result<()> {
     let mut pla = Pla::open(path)?;
@@ -66,6 +66,8 @@ fn walls(path: &str, as_json: bool) -> Result<()> {
                     "arcAngle": w.arc_angle,
                     "profile": w.profile.to_string(),
                     "slantAlpha": w.slant_alpha,
+                    "doors": w.doors.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
+                    "windows": w.windows.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
                     "notes": w.notes,
                 })
             })
@@ -88,6 +90,51 @@ fn walls(path: &str, as_json: bool) -> Result<()> {
                 w.home_story_name.as_deref().unwrap_or("?")
             );
             for n in &w.notes {
+                println!("  note: {n}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn openings(path: &str, as_json: bool) -> Result<()> {
+    let openings = Pla::open(path)?.openings()?;
+    if as_json {
+        let v: Vec<_> = openings
+            .iter()
+            .map(|o| {
+                json!({
+                    "guid": o.guid.to_string(),
+                    "kind": o.kind.to_string(),
+                    "id": o.id,
+                    "width": o.width,
+                    "height": o.height,
+                    "sillHeight": o.sill_height,
+                    "centerOffset": o.center_offset,
+                    "reflected": o.reflected,
+                    "oSide": o.o_side,
+                    "refSide": o.ref_side,
+                    "hostWall": o.host_wall.map(|g| g.to_string()),
+                    "libPart": o.lib_part.map(|g| g.to_string()),
+                    "notes": o.notes,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&v).expect("JSON"));
+    } else {
+        for o in &openings {
+            println!(
+                "{} {} {:?} {} x {} sill {} at {} on wall {}",
+                o.guid,
+                o.kind,
+                o.id,
+                o.width,
+                o.height,
+                o.sill_height,
+                o.center_offset,
+                o.host_wall.map_or("?".to_string(), |g| g.to_string())
+            );
+            for n in &o.notes {
                 println!("  note: {n}");
             }
         }
@@ -129,6 +176,8 @@ fn main() -> ExitCode {
         ["stories", f, "--json"] | ["stories", "--json", f] => stories(f, true),
         ["walls", f] => walls(f, false),
         ["walls", f, "--json"] | ["walls", "--json", f] => walls(f, true),
+        ["openings", f] => openings(f, false),
+        ["openings", f, "--json"] | ["openings", "--json", f] => openings(f, true),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

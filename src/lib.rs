@@ -2,8 +2,9 @@
 //!
 //! The file is a header followed by 16-byte units holding blocks, compressed
 //! sections and gap units. [`Pla::walk`] visits every live block without
-//! loading the whole file; [`Pla::stories`] and [`Pla::walls`] decode stories
-//! and walls.
+//! loading the whole file; [`Pla::stories`], [`Pla::walls`] and
+//! [`Pla::openings`] decode stories, walls, and doors and windows. Objects are
+//! recognised by the class GUID at the start of their payload.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -11,10 +12,12 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+mod opening;
 mod quicklz;
 mod story;
 mod wall;
 
+pub use opening::{Opening, OpeningKind};
 pub use story::Story;
 pub use wall::{Geometry, Profile, ReferenceLine, Structure, Wall};
 
@@ -201,13 +204,15 @@ fn split_object(p: &[u8]) -> Result<(&[u8], &[u8])> {
 
 /// Link tag: this object owns the listed targets under one role.
 const TAG_OWNS_MANY: u8 = 0x01;
+/// Link tag with the same list form as `0x01` (meaning not documented yet).
+const TAG_LIST_2: u8 = 0x02;
 /// Link tag: this object owns the target.
 const TAG_OWNS: u8 = 0x11;
 /// Link tag: this object is owned by (points up to) the target.
 const TAG_OWNED_BY: u8 = 0x12;
 
 /// Link list items `(tag, role, target)`, stopping at the end mark or an
-/// unknown tag. A `0x01` item gives one entry per listed target.
+/// unknown tag. A `0x01` or `0x02` item gives one entry per listed target.
 fn links(list: &[u8]) -> Vec<(u8, Guid, Guid)> {
     let mut v = Vec::new();
     if list.get(0..2) != Some(&[1, 0][..]) {
@@ -227,7 +232,7 @@ fn links(list: &[u8]) -> Vec<(u8, Guid, Guid)> {
                 ));
                 i += 33;
             }
-            TAG_OWNS_MANY => {
+            TAG_OWNS_MANY | TAG_LIST_2 => {
                 let Some(n) = u32_at(list, i + 17) else {
                     break;
                 };
@@ -533,6 +538,17 @@ impl Pla {
     /// Decode every wall in the file.
     pub fn walls(&mut self) -> Result<Vec<Wall>> {
         wall::Objects::read(self)?.walls()
+    }
+
+    /// Decode every door and window in the file.
+    pub fn openings(&mut self) -> Result<Vec<Opening>> {
+        wall::Objects::read(self)?.openings()
+    }
+
+    /// Walls and openings from one pass over the file.
+    pub fn walls_and_openings(&mut self) -> Result<(Vec<Wall>, Vec<Opening>)> {
+        let o = wall::Objects::read(self)?;
+        Ok((o.walls()?, o.openings()?))
     }
 }
 

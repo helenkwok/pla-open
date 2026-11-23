@@ -1,8 +1,8 @@
-//! Checks walls and stories against `<name>.details.json` files next to real projects.
+//! Checks walls, doors, windows and stories against `<name>.details.json` files next to real projects.
 //!
 //! Run with `PLA_OPEN_TEST_FILES=<folder>[:<folder>...] cargo test -- --ignored`.
 
-use pla_open::{Guid, Pla, Profile, Structure, Wall};
+use pla_open::{Guid, Opening, Pla, Profile, Structure, Wall};
 use serde_json::Value;
 
 fn close(a: f64, b: &Value) -> bool {
@@ -94,12 +94,55 @@ fn compare_wall(w: &Wall, e: &Value) -> Vec<String> {
     bad
 }
 
+/// Compare one door or window with its details; returns the fields that differ.
+fn compare_opening(o: &Opening, e: &Value) -> Vec<String> {
+    let x = &e["details"];
+    let mut bad: Vec<String> = o.notes.iter().map(|n| format!("note: {n}")).collect();
+    if e["type"].as_str() != Some(o.kind.to_string().as_str()) {
+        bad.push(format!("kind {}", o.kind));
+    }
+    if e["id"].as_str() != Some(o.id.as_str()) {
+        bad.push(format!("id {:?}", o.id));
+    }
+    for (label, ours, theirs) in [
+        ("width", o.width, &x["width"]),
+        ("height", o.height, &x["height"]),
+        ("sill height", o.sill_height, &x["sillHeight"]),
+        ("center offset", o.center_offset, &x["centerOffset"]),
+    ] {
+        if !theirs.is_null() && !close(ours, theirs) {
+            bad.push(format!("{label} {ours} vs {theirs}"));
+        }
+    }
+    for (label, ours, theirs) in [
+        ("reflected", o.reflected, &x["reflected"]),
+        ("oSide", o.o_side, &x["oSide"]),
+        ("refSide", o.ref_side, &x["refSide"]),
+    ] {
+        if theirs.as_bool().is_some_and(|t| t != ours) {
+            bad.push(format!("{label} {ours}"));
+        }
+    }
+    for (label, ours, theirs) in [
+        ("host wall", o.host_wall, &x["ownerElementId"]["guid"]),
+        ("library part", o.lib_part, &x["libPart"]["ownUnID"]["guid"]),
+    ] {
+        if let Some(t) = theirs.as_str() {
+            if ours != Guid::parse(t) {
+                bad.push(format!("{label} {ours:?} vs {t}"));
+            }
+        }
+    }
+    bad
+}
+
 #[test]
 #[ignore = "needs PLA_OPEN_TEST_FILES"]
 fn walls_and_stories_match_details() {
     let dirs = std::env::var_os("PLA_OPEN_TEST_FILES").expect("set PLA_OPEN_TEST_FILES");
     let mut files = 0;
     let mut matched = 0;
+    let mut openings_matched = 0;
     let mut tables = 0;
     let mut problems = Vec::new();
     let mut entries: Vec<_> = std::env::split_paths(&dirs)
@@ -116,14 +159,17 @@ fn walls_and_stories_match_details() {
         let st = pla
             .walk(|_| Ok(()))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
-        let walls = pla.walls().unwrap_or_else(|e| panic!("{name}: {e}"));
+        let (walls, openings) = pla
+            .walls_and_openings()
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         let stories = pla.stories().unwrap_or_else(|e| panic!("{name}: {e}"));
         println!(
-            "{name}: {} blocks, {} sections, {} gap units, {} walls, {} stories",
+            "{name}: {} blocks, {} sections, {} gap units, {} walls, {} doors/windows, {} stories",
             st.blocks,
             st.sections,
             st.gap_units,
             walls.len(),
+            openings.len(),
             stories.len()
         );
         let details = path.with_file_name(format!("{name}.details.json"));
@@ -181,8 +227,50 @@ fn walls_and_stories_match_details() {
                 problems.push(format!("{name}: wall {label}: {}", bad.join(", ")));
             }
         }
+
+        let expected: Vec<&Value> = d["detailsOfElements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "Door" || e["type"] == "Window")
+            .collect();
+        if expected.len() != openings.len() {
+            problems.push(format!(
+                "{name}: {} doors/windows expected, {} read",
+                expected.len(),
+                openings.len()
+            ));
+        }
+        for e in expected {
+            let label = e["guid"].as_str().unwrap_or("?");
+            let Some(o) = e["guid"]
+                .as_str()
+                .and_then(Guid::parse)
+                .and_then(|g| openings.iter().find(|o| o.guid == g))
+            else {
+                problems.push(format!("{name}: door/window {label} not found"));
+                continue;
+            };
+            let mut bad = compare_opening(o, e);
+            // The host wall must list the opening back.
+            let listed = walls.iter().any(|w| {
+                Some(w.guid) == o.host_wall
+                    && (w.doors.contains(&o.guid) || w.windows.contains(&o.guid))
+            });
+            if !listed {
+                bad.push("not listed by its host wall".into());
+            }
+            if bad.is_empty() {
+                openings_matched += 1;
+            } else {
+                problems.push(format!("{name}: {} {label}: {}", o.kind, bad.join(", ")));
+            }
+        }
     }
-    println!("{matched} walls matched, {tables} story tables matched, in {files} files");
+    println!(
+        "{matched} walls matched, {openings_matched} doors/windows matched, \
+         {tables} story tables matched, in {files} files"
+    );
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(files > 0, "no .pln files with .details.json found");
 }

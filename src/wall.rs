@@ -1,16 +1,23 @@
-//! Walls (object type 265), with the objects they point to: story objects
-//! (210), top anchors (204), composites (137) and the story table (224).
+//! Walls (found by class GUID), with the objects they point to: story objects
+//! (type 210), top anchors (204), composites (137) and the story table (224).
+//! Those four are still found by block type number: they sit in the range below
+//! 470 where numbers have been the same class in every file, and their class
+//! GUIDs are not documented yet. Doors and windows are gathered here too.
 
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::opening::{self, Opening, OpeningKind};
 use crate::story::{self, Story, STORY_TABLE_TYPE, STORY_TYPE};
 use crate::{
     counted_utf16, f64_at, i32_at, links, split_object, u16_at, u32_at, utf16, Error, Guid, Pla,
-    Result, TAG_OWNED_BY,
+    Result, TAG_OWNED_BY, TAG_OWNS, TAG_OWNS_MANY,
 };
 
-pub const WALL_TYPE: i16 = 265;
+pub(crate) const WALL_CLASS: &str = "4f654582-33af-4e52-abfc-c35d46765ec4";
+/// Block type walls have had in every file so far (only used to keep decode
+/// errors of such blocks fatal, as before).
+const WALL_TYPE: i16 = 265;
 const TOP_ANCHOR_TYPE: i16 = 204;
 const COMPOSITE_TYPE: i16 = 137;
 
@@ -164,6 +171,9 @@ pub struct Wall {
     pub profile: Profile,
     /// Slant angle, only for a slanted profile.
     pub slant_alpha: Option<f64>,
+    /// Doors and windows hosted by this wall (their GUIDs), in link-list order.
+    pub doors: Vec<Guid>,
+    pub windows: Vec<Guid>,
     /// Things in the record that a valid file should not contain. The wall is
     /// still read; each note says which reading was taken.
     pub notes: Vec<String>,
@@ -172,7 +182,12 @@ pub struct Wall {
 /// The objects walls and stories are read from, gathered in one walk.
 pub(crate) struct Objects {
     types: HashMap<Guid, i16>,
+    /// Block GUID -> class GUID (first 16 bytes of the payload).
+    classes: HashMap<Guid, Guid>,
     walls: Vec<(Guid, Vec<u8>)>,
+    openings: Vec<(Guid, OpeningKind, Vec<u8>)>,
+    /// Library-part reference object -> the library part ID it holds.
+    lib_parts: HashMap<Guid, Option<Guid>>,
     /// Story object GUID -> (story index, name).
     story_objects: HashMap<Guid, (i16, String)>,
     /// Top anchor GUID -> GUID of its story object.
@@ -202,9 +217,16 @@ impl Objects {
     /// GUID left behind by a deleted object never resolves.
     pub(crate) fn read(pla: &mut Pla) -> Result<Objects> {
         let anchor_role = Guid::parse(ANCHOR_STORY_ROLE).unwrap();
+        let wall_class = Guid::parse(WALL_CLASS).unwrap();
+        let door_class = Guid::parse(opening::DOOR_CLASS).unwrap();
+        let window_class = Guid::parse(opening::WINDOW_CLASS).unwrap();
+        let lib_class = Guid::parse(opening::LIB_PART_REF_CLASS).unwrap();
         let mut o = Objects {
             types: HashMap::new(),
+            classes: HashMap::new(),
             walls: Vec::new(),
+            openings: Vec::new(),
+            lib_parts: HashMap::new(),
             story_objects: HashMap::new(),
             anchors: HashMap::new(),
             composites: HashMap::new(),
@@ -218,19 +240,45 @@ impl Objects {
             }
             let g = b.info.guid;
             o.types.insert(g, ty);
+            let known = matches!(
+                ty,
+                WALL_TYPE | STORY_TYPE | TOP_ANCHOR_TYPE | COMPOSITE_TYPE | STORY_TABLE_TYPE
+            );
+            // Every payload is decoded to learn its class; a block of a type
+            // this reader does not use may fail without stopping the read.
+            let p = match b.payload() {
+                Ok(p) => p,
+                Err(e) if known => return Err(e),
+                Err(_) => return Ok(()),
+            };
+            if p.len() >= 16 {
+                let class = Guid::from_slice(&p);
+                o.classes.insert(g, class);
+                if class == wall_class {
+                    o.walls.push((g, p));
+                    return Ok(());
+                } else if class == door_class {
+                    o.openings.push((g, OpeningKind::Door, p));
+                    return Ok(());
+                } else if class == window_class {
+                    o.openings.push((g, OpeningKind::Window, p));
+                    return Ok(());
+                } else if class == lib_class {
+                    o.lib_parts.insert(g, opening::parse_lib_part_ref(&p));
+                    return Ok(());
+                }
+            }
             match ty {
-                WALL_TYPE => o.walls.push((g, b.payload()?)),
                 STORY_TYPE => {
-                    o.story_objects
-                        .insert(g, story::parse_story_object(&b.payload()?)?);
+                    o.story_objects.insert(g, story::parse_story_object(&p)?);
                 }
                 TOP_ANCHOR_TYPE => {
-                    if let Some(s) = owned_by(&b.payload()?, anchor_role) {
+                    if let Some(s) = owned_by(&p, anchor_role) {
                         o.anchors.insert(g, s);
                     }
                 }
                 COMPOSITE_TYPE => {
-                    if let Some((i, name)) = parse_composite(&b.payload()?) {
+                    if let Some((i, name)) = parse_composite(&p) {
                         o.composites.entry(i).or_default().push((g, name));
                     }
                 }
@@ -241,7 +289,7 @@ impl Objects {
                             "more than one story table (probably hotlink modules)",
                         ));
                     }
-                    o.stories = story::parse_table(&b.payload()?)?;
+                    o.stories = story::parse_table(&p)?;
                 }
                 _ => {}
             }
@@ -254,6 +302,13 @@ impl Objects {
         self.walls
             .iter()
             .map(|(g, p)| self.decode_wall(*g, p))
+            .collect()
+    }
+
+    pub(crate) fn openings(&self) -> Result<Vec<Opening>> {
+        self.openings
+            .iter()
+            .map(|(g, k, p)| opening::decode(*g, *k, p, &self.classes, &self.lib_parts))
             .collect()
     }
 
@@ -284,7 +339,24 @@ impl Objects {
         let mut notes = Vec::new();
         let mut home_story = None;
         let mut top_anchor = None;
+        let (door_role, window_role) = (
+            OpeningKind::Door.host_role(),
+            OpeningKind::Window.host_role(),
+        );
+        let door_class = Guid::parse(opening::DOOR_CLASS).unwrap();
+        let window_class = Guid::parse(opening::WINDOW_CLASS).unwrap();
+        let (mut doors, mut windows) = (Vec::new(), Vec::new());
         for (tag, role, target) in links(list) {
+            // Two or more openings of one kind come as one owns-many item.
+            if tag == TAG_OWNS || tag == TAG_OWNS_MANY {
+                let class = self.classes.get(&target);
+                if role == door_role && class == Some(&door_class) {
+                    doors.push(target);
+                } else if role == window_role && class == Some(&window_class) {
+                    windows.push(target);
+                }
+                continue;
+            }
             if tag != TAG_OWNED_BY {
                 continue;
             }
@@ -381,6 +453,8 @@ impl Objects {
             arc_angle: f(0x75),
             profile,
             slant_alpha: (profile == Profile::Slanted).then(|| f(0xBA)),
+            doors,
+            windows,
             notes,
         })
     }
