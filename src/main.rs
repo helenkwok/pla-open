@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use pla_open::{Pla, Result};
 use serde_json::json;
 
-const USAGE: &str = "usage: pla-open info FILE\n       pla-open stories FILE [--json]\n       pla-open walls FILE [--json]\n       pla-open openings FILE [--json]";
+const USAGE: &str = "usage: pla-open info FILE\n       pla-open stories FILE [--json]\n       pla-open walls FILE [--json]\n       pla-open openings FILE [--json]\n       pla-open attributes FILE";
 
 fn info(path: &str) -> Result<()> {
     let mut pla = Pla::open(path)?;
@@ -168,6 +168,19 @@ fn stories(path: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Attribute GUIDs as JSON: composites, layers, building materials.
+fn attributes(path: &str) -> Result<()> {
+    let a = Pla::open(path)?.attributes()?;
+    let s = |v: &[pla_open::Guid]| v.iter().map(|g| g.to_string()).collect::<Vec<_>>();
+    let v = json!({
+        "composites": s(&a.composites),
+        "layers": s(&a.layers),
+        "buildingMaterials": s(&a.building_materials),
+    });
+    println!("{}", serde_json::to_string_pretty(&v).expect("JSON"));
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let r = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
@@ -178,6 +191,7 @@ fn main() -> ExitCode {
         ["walls", f, "--json"] | ["walls", "--json", f] => walls(f, true),
         ["openings", f] => openings(f, false),
         ["openings", f, "--json"] | ["openings", "--json", f] => openings(f, true),
+        ["attributes", f] => attributes(f),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

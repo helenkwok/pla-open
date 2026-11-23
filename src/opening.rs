@@ -4,17 +4,17 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::{f64_at, links, split_object, u32_at, utf16, Error, Guid, Result};
-use crate::{TAG_OWNED_BY, TAG_OWNS};
+use crate::{owned, owns};
 
 pub(crate) const DOOR_CLASS: &str = "d8f07689-9cfa-4fbe-aeb4-0a60b8e667ee";
 pub(crate) const WINDOW_CLASS: &str = "93f161a0-4c4e-4df7-a100-4fd0e8c4f1e1";
 /// Library-part reference object, owned by a door or window.
 pub(crate) const LIB_PART_REF_CLASS: &str = "2bfca33d-bd38-49e3-bf6d-52ac8b850b9f";
-/// Role of the host-wall link (wall `0x11` to the door, door `0x12` to the wall).
+/// Role of the host-wall link (wall `0x11`/`0x01` to the door, door `0x12` to the wall).
 pub(crate) const DOOR_HOST_ROLE: &str = "1f6bfe02-d60c-40ae-9ac8-c3953ce12814";
 pub(crate) const WINDOW_HOST_ROLE: &str = "c54379e6-afd0-4b9a-9887-af5baeeccf84";
-/// Only the first group of the library-part link's role GUID is documented.
-const LIB_PART_ROLE_PREFIX: &str = "672f1c46-";
+/// Role of a door's or window's link to its library-part reference.
+pub(crate) const LIB_PART_ROLE: &str = "672f1c46-64f3-41f5-8a4a-ffdfd86bcbfd";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpeningKind {
@@ -108,22 +108,22 @@ pub(crate) fn decode(
 
     let wall_class = Guid::parse(crate::wall::WALL_CLASS).unwrap();
     let host_role = kind.host_role();
+    let lib_role = Guid::parse(LIB_PART_ROLE).unwrap();
     let mut host_wall = None;
     let mut lib_part = None;
     for (tag, role, target) in links(list) {
-        let (slot, what, value) = if tag == TAG_OWNED_BY
-            && role == host_role
-            && classes.get(&target) == Some(&wall_class)
-        {
-            (&mut host_wall, "host wall", Some(target))
-        } else if tag == TAG_OWNS && role.to_string().starts_with(LIB_PART_ROLE_PREFIX) {
-            let Some(v) = lib_parts.get(&target) else {
+        // The opening's own owned-side link is authoritative for the host.
+        let (slot, what, value) =
+            if owned(tag) && role == host_role && classes.get(&target) == Some(&wall_class) {
+                (&mut host_wall, "host wall", Some(target))
+            } else if owns(tag) && role == lib_role {
+                let Some(v) = lib_parts.get(&target) else {
+                    continue;
+                };
+                (&mut lib_part, "library part", *v)
+            } else {
                 continue;
             };
-            (&mut lib_part, "library part", *v)
-        } else {
-            continue;
-        };
         if slot.is_some() {
             notes.push(format!("more than one {what} link; the first is used"));
         } else {
