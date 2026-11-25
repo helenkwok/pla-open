@@ -1,5 +1,8 @@
 //! Checks walls, doors, windows and stories against `<name>.details.json` files next to real projects.
 //!
+//! Attribute GUIDs are checked against `<name>.q.json` (the API's attribute
+//! lists) where present.
+//!
 //! Run with `PLA_OPEN_TEST_FILES=<folder>[:<folder>...] cargo test -- --ignored`.
 
 use pla_open::{Guid, Opening, Pla, Profile, Structure, Wall};
@@ -144,6 +147,7 @@ fn walls_and_stories_match_details() {
     let mut matched = 0;
     let mut openings_matched = 0;
     let mut tables = 0;
+    let mut attribute_files = 0;
     let mut problems = Vec::new();
     let mut entries: Vec<_> = std::env::split_paths(&dirs)
         .flat_map(|d| std::fs::read_dir(d).unwrap().map(|e| e.unwrap().path()))
@@ -172,6 +176,35 @@ fn walls_and_stories_match_details() {
             openings.len(),
             stories.len()
         );
+        if let Ok(text) = std::fs::read_to_string(path.with_file_name(format!("{name}.q.json"))) {
+            let q: Value = serde_json::from_str(&text).unwrap();
+            let a = pla.attributes().unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut same = true;
+            for (key, ours) in [
+                ("attr_Composite", &a.composites),
+                ("attr_Layer", &a.layers),
+                ("attr_BuildingMaterial", &a.building_materials),
+            ] {
+                let mut theirs: Vec<Guid> = q[key]["attributeIds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|x| Guid::parse(x["attributeId"]["guid"].as_str().unwrap()).unwrap())
+                    .collect();
+                let mut ours = ours.clone();
+                theirs.sort();
+                ours.sort();
+                if ours != theirs {
+                    same = false;
+                    problems.push(format!(
+                        "{name}: {key}: {} read, {} expected",
+                        ours.len(),
+                        theirs.len()
+                    ));
+                }
+            }
+            attribute_files += usize::from(same);
+        }
         let details = path.with_file_name(format!("{name}.details.json"));
         let Ok(text) = std::fs::read_to_string(&details) else {
             continue;
@@ -269,7 +302,8 @@ fn walls_and_stories_match_details() {
     }
     println!(
         "{matched} walls matched, {openings_matched} doors/windows matched, \
-         {tables} story tables matched, in {files} files"
+         {tables} story tables matched, in {files} files; \
+         attributes matched in {attribute_files} files"
     );
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(files > 0, "no .pln files with .details.json found");

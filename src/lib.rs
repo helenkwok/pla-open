@@ -2,9 +2,10 @@
 //!
 //! The file is a header followed by 16-byte units holding blocks, compressed
 //! sections and gap units. [`Pla::walk`] visits every live block without
-//! loading the whole file; [`Pla::stories`], [`Pla::walls`] and
-//! [`Pla::openings`] decode stories, walls, and doors and windows. Objects are
-//! recognised by the class GUID at the start of their payload.
+//! loading the whole file; [`Pla::stories`], [`Pla::walls`],
+//! [`Pla::openings`] and [`Pla::attributes`] decode stories, walls, doors and
+//! windows, and attribute GUIDs. Objects are recognised by the class GUID at
+//! the start of their payload; block type numbers are only a hint.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -19,7 +20,7 @@ mod wall;
 
 pub use opening::{Opening, OpeningKind};
 pub use story::Story;
-pub use wall::{Geometry, Profile, ReferenceLine, Structure, Wall};
+pub use wall::{Attributes, Geometry, Profile, ReferenceLine, Structure, Wall};
 
 /// Largest block, section or decoded payload we accept, in bytes.
 pub const MAX_ITEM_BYTES: usize = 256 << 20;
@@ -202,17 +203,30 @@ fn split_object(p: &[u8]) -> Result<(&[u8], &[u8])> {
     Ok((data, links))
 }
 
-/// Link tag: this object owns the listed targets under one role.
+// Link tags come in two pairs; every link has its mirror on the target with
+// the same role (owner side on one object, owned side on the other).
+/// Owner side, several targets: `[tag][role][u32 count][targets]`.
 const TAG_OWNS_MANY: u8 = 0x01;
-/// Link tag with the same list form as `0x01` (meaning not documented yet).
-const TAG_LIST_2: u8 = 0x02;
-/// Link tag: this object owns the target.
+/// Owned side, several owners: the list form of `0x12`.
+const TAG_OWNED_BY_MANY: u8 = 0x02;
+/// Owner side, one target: `[tag][role][target]`.
 const TAG_OWNS: u8 = 0x11;
-/// Link tag: this object is owned by (points up to) the target.
+/// Owned side, one owner: this object points up to the target.
 const TAG_OWNED_BY: u8 = 0x12;
 
+/// True for the owner side (`0x11` or `0x01`).
+fn owns(tag: u8) -> bool {
+    tag == TAG_OWNS || tag == TAG_OWNS_MANY
+}
+
+/// True for the owned side (`0x12` or `0x02`).
+fn owned(tag: u8) -> bool {
+    tag == TAG_OWNED_BY || tag == TAG_OWNED_BY_MANY
+}
+
 /// Link list items `(tag, role, target)`, stopping at the end mark or an
-/// unknown tag. A `0x01` or `0x02` item gives one entry per listed target.
+/// unknown tag. A `0x01` or `0x02` item gives one entry per listed target
+/// (a list of one is accepted).
 fn links(list: &[u8]) -> Vec<(u8, Guid, Guid)> {
     let mut v = Vec::new();
     if list.get(0..2) != Some(&[1, 0][..]) {
@@ -232,7 +246,7 @@ fn links(list: &[u8]) -> Vec<(u8, Guid, Guid)> {
                 ));
                 i += 33;
             }
-            TAG_OWNS_MANY | TAG_LIST_2 => {
+            TAG_OWNS_MANY | TAG_OWNED_BY_MANY => {
                 let Some(n) = u32_at(list, i + 17) else {
                     break;
                 };
@@ -543,6 +557,11 @@ impl Pla {
     /// Decode every door and window in the file.
     pub fn openings(&mut self) -> Result<Vec<Opening>> {
         wall::Objects::read(self)?.openings()
+    }
+
+    /// GUIDs of the composite, layer and building material attributes.
+    pub fn attributes(&mut self) -> Result<Attributes> {
+        Ok(wall::Objects::read(self)?.attributes)
     }
 
     /// Walls and openings from one pass over the file.

@@ -7,10 +7,10 @@ An open-source reader for Archicad project files (`.pln` and `.pla`), written in
 - **The container.** It checks the file signature, walks the whole file (blocks, compressed sections and the empty units between them) and decodes block payloads stored raw, with a zero mask, or with QuickLZ level 1. Large compressed sections are stored in 1 MiB chunks; the reader joins them before walking the blocks inside, since blocks cross chunk boundaries. Every block can be listed by type and GUID.
 - **Stories.** The story table: index (negative for stories below ground), level, height and name of each story, plus the extra story above the top one that the file keeps to give the top story its height.
 - **Walls.** For each wall: element ID, start and end points, thickness at each end, height, bottom offset, home story, and for a wall whose top is linked to a story the top story, the top offset and the height worked out from the story levels. Also the reference line (outside, center, inside, or the same three for the core) with its offset and its distance from the outside face, whether the wall is flipped, basic or composite structure with the composite's name, straight, trapezoid or polygonal plan, the arc angle of a curved wall, and normal or slanted profile with the slant angle.
-
 - **Doors and windows.** For each: door or window, element ID, width, height, sill height, the centre's distance along the host wall's reference line from its begin point, the three flip flags (mirrored, opening side flipped, placed from the wall's other side), the host wall, and the library part's own unique ID. Each wall lists the doors and windows it hosts.
+- **Attributes.** The GUIDs of the composite, layer and building material attributes (Archicad's own attribute GUIDs).
 
-Objects are recognised by the class GUID at the start of their payload, since block type numbers from about 470 up are given out per file. Walls, doors and windows are found that way; stories, the story table, top anchors and composites are still found by block type number, which has been the same in every file seen for types below 470.
+Objects are recognised by the class GUID at the start of their payload, since block type numbers from about 470 up are given out per file. Every kind the reader uses is found that way: walls, doors and windows, stories, the story table, top anchors, composites, layers and building materials. The type numbers the lower kinds have had in every file seen (265, 210, 204, 137, 224, 140, 151) are only a hint.
 
 Values a valid project should not hold (a reference line code above 5, a top linked below the home story, two composites with one index, a second home or top link, a flipped flag other than 0 or 1) do not stop the reader: the wall is still read and each problem is listed in its `notes`. The top offset is reported only for a wall whose top is linked. A file with more than one story table (probably from hotlinked modules) is reported as not supported yet.
 
@@ -33,6 +33,7 @@ pla-open walls FILE          # one line per wall
 pla-open walls FILE --json   # walls as JSON (lengths in metres, angles in radians)
 pla-open openings FILE       # one line per door or window
 pla-open openings FILE --json
+pla-open attributes FILE     # attribute GUIDs as JSON
 ```
 
 As a library:

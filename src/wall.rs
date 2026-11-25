@@ -1,25 +1,29 @@
-//! Walls (found by class GUID), with the objects they point to: story objects
-//! (type 210), top anchors (204), composites (137) and the story table (224).
-//! Those four are still found by block type number: they sit in the range below
-//! 470 where numbers have been the same class in every file, and their class
-//! GUIDs are not documented yet. Doors and windows are gathered here too.
+//! Walls, with the objects they point to: story objects, top anchors,
+//! composites and the story table. Every kind is found by its class GUID; the
+//! block type number each kind has had so far (265, 210, 204, 137, 224) is only
+//! a hint. Doors and windows, layers and building materials are gathered here too.
 
 use std::collections::HashMap;
 use std::fmt;
 
 use crate::opening::{self, Opening, OpeningKind};
-use crate::story::{self, Story, STORY_TABLE_TYPE, STORY_TYPE};
+use crate::story::{self, Story};
 use crate::{
-    counted_utf16, f64_at, i32_at, links, split_object, u16_at, u32_at, utf16, Error, Guid, Pla,
-    Result, TAG_OWNED_BY, TAG_OWNS, TAG_OWNS_MANY,
+    counted_utf16, f64_at, i32_at, links, owned, owns, split_object, u16_at, u32_at, utf16, Error,
+    Guid, Pla, Result,
 };
 
 pub(crate) const WALL_CLASS: &str = "4f654582-33af-4e52-abfc-c35d46765ec4";
-/// Block type walls have had in every file so far (only used to keep decode
-/// errors of such blocks fatal, as before).
-const WALL_TYPE: i16 = 265;
-const TOP_ANCHOR_TYPE: i16 = 204;
-const COMPOSITE_TYPE: i16 = 137;
+pub(crate) const STORY_CLASS: &str = "bc046b25-27d6-461a-a6e5-6fa0e8594a95";
+pub(crate) const STORY_TABLE_CLASS: &str = "2fa7b8cb-ee33-48d6-8daa-8a3fe02bddea";
+pub(crate) const TOP_ANCHOR_CLASS: &str = "64d6044d-03e8-42ec-bd56-8813cc6481cb";
+pub(crate) const COMPOSITE_CLASS: &str = "c7ecb629-3cf3-4c9c-a222-11082672e04b";
+pub(crate) const LAYER_CLASS: &str = "6fda3fe2-8e75-4e3f-b8c0-d0c4777e5d4d";
+pub(crate) const BUILDING_MATERIAL_CLASS: &str = "2b0c5e9b-605e-4b8f-aaae-cc166f03bee5";
+/// Block types the kinds above have had in every file so far. A payload of
+/// such a block that does not decode stops the read, as before; any other
+/// block's payload may fail without stopping it.
+const HINT_TYPES: [i16; 7] = [265, 210, 204, 137, 224, 140, 151];
 
 /// Role of a wall's link to its home story.
 const HOME_STORY_ROLE: &str = "79b61203-ae84-4d88-a9c6-20ead705e0bc";
@@ -179,9 +183,16 @@ pub struct Wall {
     pub notes: Vec<String>,
 }
 
+/// Attribute GUIDs (the block GUIDs, which are Archicad's attribute GUIDs), in file order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Attributes {
+    pub composites: Vec<Guid>,
+    pub layers: Vec<Guid>,
+    pub building_materials: Vec<Guid>,
+}
+
 /// The objects walls and stories are read from, gathered in one walk.
 pub(crate) struct Objects {
-    types: HashMap<Guid, i16>,
     /// Block GUID -> class GUID (first 16 bytes of the payload).
     classes: HashMap<Guid, Guid>,
     walls: Vec<(Guid, Vec<u8>)>,
@@ -196,6 +207,7 @@ pub(crate) struct Objects {
     /// (more than one should not happen: indices are unique).
     composites: HashMap<i32, Vec<(Guid, String)>>,
     pub stories: Vec<Story>,
+    pub attributes: Attributes,
 }
 
 /// Decode a composite attribute payload: (index, name).
@@ -208,7 +220,7 @@ fn owned_by(p: &[u8], role: Guid) -> Option<Guid> {
     let (_, list) = split_object(p).ok()?;
     links(list)
         .into_iter()
-        .find(|&(tag, r, _)| tag == TAG_OWNED_BY && r == role)
+        .find(|&(tag, r, _)| owned(tag) && r == role)
         .map(|(_, _, target)| target)
 }
 
@@ -221,8 +233,17 @@ impl Objects {
         let door_class = Guid::parse(opening::DOOR_CLASS).unwrap();
         let window_class = Guid::parse(opening::WINDOW_CLASS).unwrap();
         let lib_class = Guid::parse(opening::LIB_PART_REF_CLASS).unwrap();
+        let [story_class, table_class, anchor_class, composite_class, layer_class, material_class] =
+            [
+                STORY_CLASS,
+                STORY_TABLE_CLASS,
+                TOP_ANCHOR_CLASS,
+                COMPOSITE_CLASS,
+                LAYER_CLASS,
+                BUILDING_MATERIAL_CLASS,
+            ]
+            .map(|c| Guid::parse(c).unwrap());
         let mut o = Objects {
-            types: HashMap::new(),
             classes: HashMap::new(),
             walls: Vec::new(),
             openings: Vec::new(),
@@ -231,6 +252,7 @@ impl Objects {
             anchors: HashMap::new(),
             composites: HashMap::new(),
             stories: Vec::new(),
+            attributes: Attributes::default(),
         };
         let mut tables = 0;
         pla.walk(|b| {
@@ -239,59 +261,48 @@ impl Objects {
                 return Ok(());
             }
             let g = b.info.guid;
-            o.types.insert(g, ty);
-            let known = matches!(
-                ty,
-                WALL_TYPE | STORY_TYPE | TOP_ANCHOR_TYPE | COMPOSITE_TYPE | STORY_TABLE_TYPE
-            );
-            // Every payload is decoded to learn its class; a block of a type
-            // this reader does not use may fail without stopping the read.
+            // Every payload is decoded to learn its class.
             let p = match b.payload() {
                 Ok(p) => p,
-                Err(e) if known => return Err(e),
+                Err(e) if HINT_TYPES.contains(&ty) => return Err(e),
                 Err(_) => return Ok(()),
             };
-            if p.len() >= 16 {
-                let class = Guid::from_slice(&p);
-                o.classes.insert(g, class);
-                if class == wall_class {
-                    o.walls.push((g, p));
-                    return Ok(());
-                } else if class == door_class {
-                    o.openings.push((g, OpeningKind::Door, p));
-                    return Ok(());
-                } else if class == window_class {
-                    o.openings.push((g, OpeningKind::Window, p));
-                    return Ok(());
-                } else if class == lib_class {
-                    o.lib_parts.insert(g, opening::parse_lib_part_ref(&p));
-                    return Ok(());
-                }
+            if p.len() < 16 {
+                return Ok(());
             }
-            match ty {
-                STORY_TYPE => {
-                    o.story_objects.insert(g, story::parse_story_object(&p)?);
+            let class = Guid::from_slice(&p);
+            o.classes.insert(g, class);
+            if class == wall_class {
+                o.walls.push((g, p));
+            } else if class == door_class {
+                o.openings.push((g, OpeningKind::Door, p));
+            } else if class == window_class {
+                o.openings.push((g, OpeningKind::Window, p));
+            } else if class == lib_class {
+                o.lib_parts.insert(g, opening::parse_lib_part_ref(&p));
+            } else if class == story_class {
+                o.story_objects.insert(g, story::parse_story_object(&p)?);
+            } else if class == anchor_class {
+                if let Some(s) = owned_by(&p, anchor_role) {
+                    o.anchors.insert(g, s);
                 }
-                TOP_ANCHOR_TYPE => {
-                    if let Some(s) = owned_by(&p, anchor_role) {
-                        o.anchors.insert(g, s);
-                    }
+            } else if class == composite_class {
+                o.attributes.composites.push(g);
+                if let Some((i, name)) = parse_composite(&p) {
+                    o.composites.entry(i).or_default().push((g, name));
                 }
-                COMPOSITE_TYPE => {
-                    if let Some((i, name)) = parse_composite(&p) {
-                        o.composites.entry(i).or_default().push((g, name));
-                    }
+            } else if class == layer_class {
+                o.attributes.layers.push(g);
+            } else if class == material_class {
+                o.attributes.building_materials.push(g);
+            } else if class == table_class {
+                tables += 1;
+                if tables > 1 {
+                    return Err(Error::Unsupported(
+                        "more than one story table (probably hotlink modules)",
+                    ));
                 }
-                STORY_TABLE_TYPE => {
-                    tables += 1;
-                    if tables > 1 {
-                        return Err(Error::Unsupported(
-                            "more than one story table (probably hotlink modules)",
-                        ));
-                    }
-                    o.stories = story::parse_table(&p)?;
-                }
-                _ => {}
+                o.stories = story::parse_table(&p)?;
             }
             Ok(())
         })?;
@@ -345,11 +356,13 @@ impl Objects {
         );
         let door_class = Guid::parse(opening::DOOR_CLASS).unwrap();
         let window_class = Guid::parse(opening::WINDOW_CLASS).unwrap();
+        let story_class = Guid::parse(STORY_CLASS).unwrap();
+        let anchor_class = Guid::parse(TOP_ANCHOR_CLASS).unwrap();
         let (mut doors, mut windows) = (Vec::new(), Vec::new());
         for (tag, role, target) in links(list) {
-            // Two or more openings of one kind come as one owns-many item.
-            if tag == TAG_OWNS || tag == TAG_OWNS_MANY {
-                let class = self.classes.get(&target);
+            let class = self.classes.get(&target);
+            // One opening of a kind is a 0x11 item, two or more one 0x01 item.
+            if owns(tag) {
                 if role == door_role && class == Some(&door_class) {
                     doors.push(target);
                 } else if role == window_role && class == Some(&window_class) {
@@ -357,13 +370,12 @@ impl Objects {
                 }
                 continue;
             }
-            if tag != TAG_OWNED_BY {
+            if !owned(tag) {
                 continue;
             }
-            let ty = self.types.get(&target);
-            let (slot, what) = if role == home_role && ty == Some(&STORY_TYPE) {
+            let (slot, what) = if role == home_role && class == Some(&story_class) {
                 (&mut home_story, "home story")
-            } else if role == top_role && ty == Some(&TOP_ANCHOR_TYPE) {
+            } else if role == top_role && class == Some(&anchor_class) {
                 (&mut top_anchor, "top")
             } else {
                 continue;

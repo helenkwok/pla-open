@@ -1,4 +1,5 @@
-//! Stories: the story table (object type 224) and story objects (type 210).
+//! Stories: the story table and story objects (found by class GUID; block
+//! types 224 and 210 so far).
 
 use crate::{counted_utf16, f64_at, split_object, u16_at, Error, Result};
 
@@ -6,9 +7,6 @@ use crate::{counted_utf16, f64_at, split_object, u16_at, Error, Result};
 fn i16_at(b: &[u8], o: usize) -> Option<i16> {
     u16_at(b, o).map(|v| v as i16)
 }
-
-pub const STORY_TABLE_TYPE: i16 = 224;
-pub const STORY_TYPE: i16 = 210;
 
 /// One story. Levels and heights in metres.
 #[derive(Clone, Debug, PartialEq)]

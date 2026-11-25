@@ -229,8 +229,24 @@ fn wall_payload_of_class(w: &WallIn, list: &[u8]) -> Vec<u8> {
     )
 }
 
+const STORY_CLASS: &str = "bc046b25-27d6-461a-a6e5-6fa0e8594a95";
+const STORY_TABLE_CLASS: &str = "2fa7b8cb-ee33-48d6-8daa-8a3fe02bddea";
+const TOP_ANCHOR_CLASS: &str = "64d6044d-03e8-42ec-bd56-8813cc6481cb";
+const COMPOSITE_CLASS: &str = "c7ecb629-3cf3-4c9c-a222-11082672e04b";
+const LAYER_CLASS: &str = "6fda3fe2-8e75-4e3f-b8c0-d0c4777e5d4d";
+const BUILDING_MATERIAL_CLASS: &str = "2b0c5e9b-605e-4b8f-aaae-cc166f03bee5";
+
+fn with_class(mut p: Vec<u8>, class: &str) -> Vec<u8> {
+    p[0..16].copy_from_slice(&role(class));
+    p
+}
+
 /// Story object (type 210): constant prefix, name at payload offset 49, then the index.
 fn story_payload(index: i16, name: &str, list: &[u8]) -> Vec<u8> {
+    with_class(story_payload_of_class(index, name, list), STORY_CLASS)
+}
+
+fn story_payload_of_class(index: i16, name: &str, list: &[u8]) -> Vec<u8> {
     object_payload(
         49 + text_len(name) + 5,
         |p| {
@@ -258,11 +274,18 @@ fn story_table_payload(records: &[(i16, f64, &str)]) -> Vec<u8> {
     }
     t.extend([0xe8, 0x86, 1, 0, 0, 2, 0, 0, 0]);
     let len = 39 + t.len();
-    object_payload(len, |p| p[39..].copy_from_slice(&t), &links(&[]))
+    with_class(
+        object_payload(len, |p| p[39..].copy_from_slice(&t), &links(&[])),
+        STORY_TABLE_CLASS,
+    )
 }
 
 /// Composite attribute (type 137): name at payload offset 55, u16 1, then the index.
 fn composite_payload(index: i32, name: &str) -> Vec<u8> {
+    with_class(composite_payload_of_class(index, name), COMPOSITE_CLASS)
+}
+
+fn composite_payload_of_class(index: i32, name: &str) -> Vec<u8> {
     object_payload(
         55 + text_len(name) + 6,
         |p| {
@@ -300,7 +323,7 @@ fn anchor_payload(story: u8, walls: &[u8]) -> Vec<u8> {
     list.extend(anchor_role());
     list.extend(g(story));
     list.push(0);
-    object_payload(60, |_| {}, &list)
+    with_class(object_payload(60, |_| {}, &list), TOP_ANCHOR_CLASS)
 }
 
 const STORY: u8 = 1;
@@ -858,8 +881,7 @@ const WINDOW_CLASS: &str = "93f161a0-4c4e-4df7-a100-4fd0e8c4f1e1";
 const LIB_REF_CLASS: &str = "2bfca33d-bd38-49e3-bf6d-52ac8b850b9f";
 const DOOR_ROLE: &str = "1f6bfe02-d60c-40ae-9ac8-c3953ce12814";
 const WINDOW_ROLE: &str = "c54379e6-afd0-4b9a-9887-af5baeeccf84";
-/// Only the first group of this role is documented; the rest is made up.
-const LIB_ROLE: &str = "672f1c46-0000-4000-8000-000000000001";
+const LIB_ROLE: &str = "672f1c46-64f3-41f5-8a4a-ffdfd86bcbfd";
 
 struct OpeningIn<'a> {
     class: &'a str,
@@ -1055,4 +1077,188 @@ fn short_opening_record_is_an_error() {
     let r = Pla::open(&path).unwrap().openings();
     std::fs::remove_file(path).unwrap();
     assert!(matches!(r, Err(Error::Corrupt(_))));
+}
+
+/// Every kind is found by class GUID wherever its type number lands, and a
+/// block of a usual type number with another class is not that kind.
+#[test]
+fn finds_lower_kinds_by_class_at_any_type_number() {
+    const HOME: u8 = 40;
+    const UPPER: u8 = 41;
+    const ANCHOR: u8 = 42;
+    const COMP: u8 = 43;
+    const LAYER: u8 = 44;
+    const MAT: u8 = 45;
+    const FAKE_STORY: u8 = 46;
+    const FAKE_COMP: u8 = 47;
+    const WALL: u8 = 48;
+    let mut f = header();
+    f.extend(raw_object(
+        611,
+        g(HOME),
+        &story_payload(0, "Ground", &links(&[])),
+    ));
+    f.extend(raw_object(
+        612,
+        g(UPPER),
+        &story_payload(1, "Upper", &links(&[])),
+    ));
+    // Type 210 and 137 with other classes: neither a story nor a composite.
+    f.extend(raw_object(
+        210,
+        g(FAKE_STORY),
+        &story_payload_of_class(0, "Not a story", &links(&[])),
+    ));
+    f.extend(raw_object(
+        137,
+        g(FAKE_COMP),
+        &composite_payload_of_class(23, "Not a composite"),
+    ));
+    f.extend(raw_object(613, g(ANCHOR), &anchor_payload(UPPER, &[WALL])));
+    f.extend(raw_object(
+        614,
+        g(70),
+        &story_table_payload(&[(0, 0.0, "Ground"), (1, 3.0, "Upper"), (2, 6.0, "")]),
+    ));
+    let mut inner = raw_object(615, g(COMP), &composite_payload(23, "Generic"));
+    inner.extend(raw_object(
+        616,
+        g(LAYER),
+        &with_class(object_payload(60, |_| {}, &links(&[])), LAYER_CLASS),
+    ));
+    inner.extend(raw_object(
+        140,
+        g(49),
+        &object_payload(60, |_| {}, &links(&[])),
+    ));
+    inner.extend(zero_mask_object(
+        617,
+        g(MAT),
+        &with_class(
+            object_payload(60, |_| {}, &links(&[])),
+            BUILDING_MATERIAL_CLASS,
+        ),
+    ));
+    f.extend(section(&inner));
+    // Home story link as a 0x02 list of one; top linked through the anchor.
+    let mut list = vec![1, 0, 0x02];
+    list.extend(home_role());
+    list.extend(1u32.to_le_bytes());
+    list.extend(g(HOME));
+    list.push(0x12);
+    list.extend(top_role());
+    list.extend(g(ANCHOR));
+    list.push(0);
+    let w = WallIn {
+        top_offset: -0.5,
+        ..DEFAULT_WALL
+    };
+    f.extend(raw_object(618, g(WALL), &wall_payload(&w, &list)));
+
+    let path = write("lower-kinds", &f);
+    let mut pla = Pla::open(&path).unwrap();
+    let stories = pla.stories().unwrap();
+    let walls = pla.walls().unwrap();
+    let attrs = pla.attributes().unwrap();
+    std::fs::remove_file(path).unwrap();
+
+    assert_eq!(stories.len(), 3);
+    assert_eq!(stories[1].name, "Upper");
+    let w = &walls[0];
+    assert_eq!(w.home_story, Some(Guid(g(HOME))));
+    assert_eq!(w.home_story_index, Some(0));
+    assert_eq!(w.home_story_name.as_deref(), Some("Ground"));
+    assert_eq!(w.top_story_index, Some(1));
+    assert_eq!(w.height, Some(2.5));
+    assert_eq!(w.composite_name.as_deref(), Some("Generic"));
+    assert_eq!(w.composite_guid, Some(Guid(g(COMP))));
+    assert!(w.notes.is_empty(), "{:?}", w.notes);
+    assert_eq!(attrs.composites, vec![Guid(g(COMP))]);
+    assert_eq!(attrs.layers, vec![Guid(g(LAYER))]);
+    assert_eq!(attrs.building_materials, vec![Guid(g(MAT))]);
+}
+
+/// Two doors as one 0x01 item and a window as a 0x11 item on one wall; the
+/// openings point up with a 0x12 item and a 0x02 list of one; the library
+/// part needs the full role GUID.
+#[test]
+fn mixed_wall_forms_and_owned_by_lists() {
+    const HOST: u8 = 50;
+    const D1: u8 = 51;
+    const D2: u8 = 52;
+    const WIN: u8 = 53;
+    const LIB: u8 = 54;
+    const LIB_ID: u8 = 55;
+    let mut wall_list = vec![1, 0, 0x01];
+    wall_list.extend(role(DOOR_ROLE));
+    wall_list.extend(2u32.to_le_bytes());
+    wall_list.extend(g(D1));
+    wall_list.extend(g(D2));
+    wall_list.push(0x11);
+    wall_list.extend(role(WINDOW_ROLE));
+    wall_list.extend(g(WIN));
+    wall_list.push(0);
+    let mut f = header();
+    f.extend(raw_object(
+        265,
+        g(HOST),
+        &wall_payload(&DEFAULT_WALL, &wall_list),
+    ));
+    let door = |center| OpeningIn {
+        class: DOOR_CLASS,
+        id: "D",
+        flags: [0; 3],
+        width: 0.9,
+        height: 2.1,
+        center,
+        sill: 0.1,
+    };
+    // D1: host as a 0x02 list of one; library part under a role that only
+    // shares the first group with the real one (not a library part link).
+    let mut d1 = vec![1, 0, 0x02];
+    d1.extend(role(DOOR_ROLE));
+    d1.extend(1u32.to_le_bytes());
+    d1.extend(g(HOST));
+    d1.push(0x11);
+    d1.extend(role("672f1c46-0000-4000-8000-000000000001"));
+    d1.extend(g(LIB));
+    d1.push(0);
+    f.extend(raw_object(480, g(D1), &opening_payload(&door(1.0), &d1)));
+    // D2: library part as a 0x01 list of one.
+    let mut d2 = vec![1, 0, 0x12];
+    d2.extend(role(DOOR_ROLE));
+    d2.extend(g(HOST));
+    d2.push(0x01);
+    d2.extend(role(LIB_ROLE));
+    d2.extend(1u32.to_le_bytes());
+    d2.extend(g(LIB));
+    d2.push(0);
+    f.extend(raw_object(480, g(D2), &opening_payload(&door(2.5), &d2)));
+    let window = OpeningIn {
+        class: WINDOW_CLASS,
+        width: 1.2,
+        sill: 0.9,
+        ..door(4.0)
+    };
+    f.extend(raw_object(
+        481,
+        g(WIN),
+        &opening_payload(&window, &links(&[(0x12, role(WINDOW_ROLE), g(HOST))])),
+    ));
+    f.extend(raw_object(482, g(LIB), &lib_ref_payload(g(LIB_ID))));
+
+    let path = write("mixed-forms", &f);
+    let (walls, openings) = Pla::open(&path).unwrap().walls_and_openings().unwrap();
+    std::fs::remove_file(path).unwrap();
+
+    assert_eq!(walls[0].doors, vec![Guid(g(D1)), Guid(g(D2))]);
+    assert_eq!(walls[0].windows, vec![Guid(g(WIN))]);
+    assert_eq!(openings.len(), 3);
+    for o in &openings {
+        assert_eq!(o.host_wall, Some(Guid(g(HOST))), "{}", o.guid);
+        assert!(o.notes.is_empty(), "{:?}", o.notes);
+    }
+    assert_eq!(openings[0].lib_part, None);
+    assert_eq!(openings[1].lib_part, Some(Guid(g(LIB_ID))));
+    assert_eq!(openings[2].kind, OpeningKind::Window);
 }
